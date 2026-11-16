@@ -49,7 +49,8 @@ targets:
         INFOPLIST_KEY_NSMicrophoneUsageDescription: Hermes uses your microphone during conversations you start.
         INFOPLIST_KEY_UIBackgroundModes: [audio, voip]
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
-        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        # Preserve the explicit CarPlay scene; auto-generation replaces its configurations with an empty dictionary.
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: NO
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         MARKETING_VERSION: 1.0
         TARGETED_DEVICE_FAMILY: '1'
