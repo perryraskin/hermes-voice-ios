@@ -1,0 +1,11 @@
+{
+  "DEVICE_TOKEN": "",
+  "HERMES_URL": "http://127.0.0.1:8642/p/voice/v1",
+  "HERMES_KEY": "",
+  "ELEVENLABS_KEY": "",
+  "VOICE_ID": "JBFqnCBsd6RMkjVDRZzb",
+  "PRODUCER_KEYS": {"hermes": "", "t3": ""},
+  "APNS_KEY_PATH": "",
+  "APNS_KEY_ID": "",
+  "APNS_TEAM_ID": ""
+}

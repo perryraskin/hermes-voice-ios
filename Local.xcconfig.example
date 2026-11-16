@@ -1,0 +1,5 @@
+// Copy to Local.xcconfig before generating the Xcode project. Never commit credentials.
+HERMES_DEVELOPMENT_TEAM = YOUR_APPLE_TEAM_ID
+// Optional private host for pairing; enter the URL in app Settings if left empty.
+// Use $()/ to prevent xcconfig treating the URL as a comment.
+HERMES_PRIVATE_HOST =

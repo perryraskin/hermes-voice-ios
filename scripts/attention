@@ -1,0 +1,9 @@
+#!/usr/bin/env python3
+"""Authenticated attention publisher for local Hermes/T3 agents. Never rings directly."""
+import argparse,json,time,urllib.request
+from pathlib import Path
+p=argparse.ArgumentParser();p.add_argument('--source',choices=['hermes','t3'],required=True);p.add_argument('--dedupe',required=True);p.add_argument('--title',required=True);p.add_argument('--body',required=True);p.add_argument('--priority',choices=['routine','important','urgent'],default='routine');p.add_argument('--decision',action='store_true');p.add_argument('--minutes',type=int,default=60);args=p.parse_args()
+c=json.loads((Path.home()/'.config/hermes-voice'/('producer-'+args.source+'.json')).read_text())
+data={'dedupe':args.dedupe,'title':args.title,'body':args.body,'priority':args.priority,'decision':args.decision,'deadline':time.time()+max(1,min(10080,args.minutes))*60}
+r=urllib.request.Request(c['url'],data=json.dumps(data).encode(),headers={'Authorization':'Bearer '+c['token'],'Content-Type':'application/json'})
+with urllib.request.urlopen(r,timeout=10) as response:print(response.read().decode())

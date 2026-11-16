@@ -1,0 +1,23 @@
+.venv/
+__pycache__/
+*.pyc
+*.xcuserstate
+xcuserdata/
+.env
+.env.*
+!.env.example
+DerivedData/
+build/
+*.ipa
+*.xcarchive/
+*.p8
+*.p12
+*.mobileprovision
+Local.xcconfig
+HermesVoice.xcodeproj/
+.DS_Store
+# Hosted Markbase docs and private working notes stay out of Git.
+.markbase/
+SPEC.md
+QA.md
+INCOMING-CALLS.md
