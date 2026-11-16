@@ -80,9 +80,15 @@ async def register_device(request):
     if not re.fullmatch(r'[a-f0-9]{32,256}',data.get('token','')) or data.get('environment') not in ['sandbox','production']:raise web.HTTPBadRequest()
     request.app['attention'].store.set('device',data);return web.json_response({'registered':True})
 async def submit(request):
-    try:event=request.app['attention'].store.submit(request['producer'],await request.json(),time.time())
+    try:
+        data=await request.json()
+        if request['producer']=='t3' and data.get('decision') and not data.get('origin'):
+            raise ValueError('T3 decisions need an originating thread')
+        thread=await request.app['returns'].validate_origin(request['producer'],data.get('origin'))
+        event=request.app['attention'].store.submit(request['producer'],data,time.time())
+        if thread:request.app['returns'].route(event['id'],thread)
     except (ValueError,TypeError):raise web.HTTPBadRequest(text='Invalid attention request')
-    return web.json_response({'id':event['id'],'queued':True})
+    return web.json_response({'id':event['id'],'queued':True,'decision_return':bool(thread)})
 async def test_call(request):
     b=request.app['attention']
     if not b.ready():return web.json_response({'error':'Incoming calls need an APNs signing key on the Mac and a registered physical iPhone.'},status=503)

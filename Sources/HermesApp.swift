@@ -47,11 +47,29 @@ enum CredentialStore {
     private var turn: String?
     private var pendingSends = 0
     private var starting = false
+    #if DEBUG
+    private var showcaseActive = false
+    #endif
     private var observer: NSObjectProtocol?
-    var active: Bool { socket != nil }
+    var active: Bool {
+        #if DEBUG
+        if showcaseActive { return true }
+        #endif
+        return socket != nil
+    }
     var label: String { muted && active ? "Muted" : state.rawValue }
     var hint: String { muted && active ? "Your microphone is paused." : state.hint }
     override init() { super.init(); observer = NotificationCenter.default.addObserver(forName:AVAudioSession.interruptionNotification, object:nil, queue:.main) { [weak self] _ in Task { @MainActor in if self?.systemManagedAudio != true { self?.pause() } } } }
+    #if DEBUG
+    func showConversationFixture() {
+        // Synthetic README data in the actual views; no socket, recording or providers.
+        showcaseActive=true;connected=true;state = .listening;level=0.38
+        entries=[.init(role:"You",text:"What needs my attention?"),
+                 .init(role:"Hermes",text:"The preview is ready. Would you like the shorter version?"),
+                 .init(role:"You",text:"Yes, keep it brief."),
+                 .init(role:"Hermes",text:"The new layout is simpler, and the main controls are easier to reach.")]
+    }
+    #endif
     func pair(_ url: URL) async {
         guard url.scheme == "hermesvoice", url.host == "pair", let parts=URLComponents(url:url,resolvingAgainstBaseURL:false), let code=parts.queryItems?.first(where:{$0.name=="code"})?.value, code.count >= 32 else { return }
         do {
@@ -115,7 +133,11 @@ enum CredentialStore {
     func toggleMute() { SystemCalls.shared.setMuted(!muted) }
     func setMuted(_ value:Bool) { muted=value;level=0;send(["type":muted ? "mute":"unmute"]) }
     func pause() { guard active else { return }; end(); state = .paused }
-    func end() { generation=UUID(); pendingSends=0; turn=nil; receiveTask?.cancel(); receiveTask=nil; socket?.cancel(with:.normalClosure,reason:nil); socket=nil; engine?.stop(); engine?.inputNode.removeTap(onBus:0); engine=nil; player?.stop(); player=nil; stopMetering(); audioQueue=[]; voiceFrames=0; level=0; muted=false; state = .ready; recognitionReady=false;attentionCallID=nil;if !systemManagedAudio { try? AVAudioSession.sharedInstance().setActive(false,options:.notifyOthersOnDeactivation) };onEnded?();systemManagedAudio=false;audioActivated=true }
+    func end() {
+        #if DEBUG
+        showcaseActive=false
+        #endif
+        generation=UUID(); pendingSends=0; turn=nil; receiveTask?.cancel(); receiveTask=nil; socket?.cancel(with:.normalClosure,reason:nil); socket=nil; engine?.stop(); engine?.inputNode.removeTap(onBus:0); engine=nil; player?.stop(); player=nil; stopMetering(); audioQueue=[]; voiceFrames=0; level=0; muted=false; state = .ready; recognitionReady=false;attentionCallID=nil;if !systemManagedAudio { try? AVAudioSession.sharedInstance().setActive(false,options:.notifyOthersOnDeactivation) };onEnded?();systemManagedAudio=false;audioActivated=true }
     func playNext() throws { guard player == nil, !audioQueue.isEmpty, active else { return }; player = try AVAudioPlayer(data:audioQueue.removeFirst()); player?.delegate=self; player?.isMeteringEnabled=true; player?.play(); state = .speaking; startMetering() }
     func startMetering() {
         meterTimer?.invalidate()

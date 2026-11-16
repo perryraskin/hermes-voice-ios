@@ -10,8 +10,12 @@ from app import create_app
 
 class ProducerTests(AioHTTPTestCase):
     async def get_application(self):
-        return create_app({'ATTENTION_DB': ':memory:', 'DEVICE_TOKEN': 'owner-test-key',
+        app = create_app({'ATTENTION_DB': ':memory:', 'DEVICE_TOKEN': 'owner-test-key',
                            'PRODUCER_KEYS': {'hermes': 'hermes-test-key', 't3': 't3-test-key'}})
+        class IsolatedDelivery:
+            async def read(self, thread): return {'threadId': thread}
+        app['returns'].delivery = IsolatedDelivery()
+        return app
 
     async def publish(self, source, directory, dedupe='test-decision'):
         root = Path(directory) / '.config/hermes-voice'
@@ -22,7 +26,7 @@ class ProducerTests(AioHTTPTestCase):
             str(Path(__file__).resolve().parents[1] / 'scripts/attention'),
             '--source', source, '--dedupe', dedupe, '--title', 'Isolated QA decision',
             '--body', 'Test only; no phone is connected.', '--priority', 'urgent',
-            '--decision', '--minutes', '15', env={**os.environ, 'HOME': directory},
+            '--decision', '--minutes', '15', env={**os.environ, 'HOME': directory, 'T3CODE_THREAD_ID': '11111111-1111-4111-8111-111111111111'},
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         stdout, stderr = await asyncio.wait_for(process.communicate(), 15)
         self.assertEqual(process.returncode, 0, stderr.decode())

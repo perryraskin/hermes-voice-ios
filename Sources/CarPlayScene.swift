@@ -3,7 +3,13 @@ import UIKit
 import Combine
 
 @MainActor final class SharedRuntime {
-    static let session = VoiceSession()
+    static let session: VoiceSession = {
+        let session=VoiceSession()
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--showcase-conversation") { session.showConversationFixture() }
+        #endif
+        return session
+    }()
 }
 @MainActor final class CarPlayScene: UIResponder, CPTemplateApplicationSceneDelegate {
     private var interface: CPInterfaceController?

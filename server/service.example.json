@@ -4,8 +4,13 @@
   "HERMES_KEY": "",
   "ELEVENLABS_KEY": "",
   "VOICE_ID": "JBFqnCBsd6RMkjVDRZzb",
-  "PRODUCER_KEYS": {"hermes": "", "t3": ""},
+  "PRODUCER_KEYS": {
+    "hermes": "",
+    "t3": ""
+  },
   "APNS_KEY_PATH": "",
   "APNS_KEY_ID": "",
-  "APNS_TEAM_ID": ""
+  "APNS_TEAM_ID": "",
+  "T3_CLI_PATH": "",
+  "VOICE_TOOL_TOKEN": ""
 }
