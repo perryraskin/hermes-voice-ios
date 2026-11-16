@@ -33,16 +33,18 @@ struct CarPlaySnapshot: Equatable {
         }
     }()
 
-    static func makeTemplate(current: VoiceState) -> CPVoiceControlTemplate {
+    static func makeTemplate(current: VoiceState, active: Bool = false, muted: Bool = false) -> CPVoiceControlTemplate {
         // CarPlay discards every state after the first five. Always include the
         // current state first; replace the template for an uncached state.
         var states=[current]
         for state in [VoiceState.ready,.connecting,.listening,.thinking,.speaking,.paused,.failed] where !states.contains(state) {
             states.append(state)
         }
-        return CPVoiceControlTemplate(voiceControlStates:states.prefix(5).map {
+        let template=CPVoiceControlTemplate(voiceControlStates:states.prefix(5).map {
             CPVoiceControlState(identifier:$0.rawValue,titleVariants:[$0.rawValue],image:artwork,repeats:false)
         })
+        configureControls(template,snapshot:CarPlaySnapshot(state:current,active:active,muted:muted))
+        return template
     }
 
     func templateApplicationScene(_ scene: CPTemplateApplicationScene, didConnect interfaceController: CPInterfaceController) {
@@ -55,7 +57,8 @@ struct CarPlaySnapshot: Equatable {
 
     private func installTemplate() {
         guard let interface else { return }
-        let next=Self.makeTemplate(current:SharedRuntime.session.state)
+        let session=SharedRuntime.session
+        let next=Self.makeTemplate(current:session.state,active:session.active,muted:session.muted)
         template=next;presented=false;lastSnapshot=nil
         interface.setRootTemplate(next,animated:false) { [weak self,weak next] success,error in
             Task { @MainActor [weak self,weak next] in
@@ -85,17 +88,35 @@ struct CarPlaySnapshot: Equatable {
         if template.activeStateIdentifier != snapshot.state.rawValue {
             template.activateVoiceControlState(withIdentifier:snapshot.state.rawValue)
         }
-        let title=snapshot.active ? (snapshot.muted ? "Unmute":"Mute") : "Start"
-        template.leadingNavigationBarButtons=[CPBarButton(title:title) { _ in
-            // CarPlay can invoke handlers from its XPC callback queue.
-            Task { @MainActor in
-                let session=SharedRuntime.session
-                if session.active { session.toggleMute() } else { SystemCalls.shared.start() }
-            }
-        }]
-        template.trailingNavigationBarButtons=snapshot.active || snapshot.state == .connecting ? [CPBarButton(title:"End") { _ in
-            Task { @MainActor in SystemCalls.shared.end() }
-        }] : []
+        Self.configureControls(template,snapshot:snapshot)
+    }
+
+    static func configureControls(_ template:CPVoiceControlTemplate,snapshot:CarPlaySnapshot) {
+        // Include usable controls in the initial XPC payload, before presentation.
+        // Navigation buttons also work with rotary controllers and hardware focus.
+        let busy=snapshot.active || snapshot.state == .connecting
+        let talk=barButton(title:busy ? "End" : "Talk") {
+            if busy { SystemCalls.shared.end() } else { SystemCalls.shared.start() }
+        }
+        talk.buttonStyle = .rounded
+        template.trailingNavigationBarButtons=[talk]
+        if snapshot.active {
+            template.leadingNavigationBarButtons=[barButton(title:snapshot.muted ? "Unmute" : "Mute") {
+                SystemCalls.shared.setMuted(!SharedRuntime.session.muted)
+            }]
+        } else {
+            template.leadingNavigationBarButtons=[]
+        }
+    }
+
+    // The outer callback must itself be nonisolated. A Task inside an
+    // actor-inferred callback is too late: Swift can trap before entering it.
+    nonisolated static func controlHandler(_ action:@escaping @MainActor @Sendable () -> Void) -> @Sendable (CPBarButton) -> Void {
+        { _ in Task { @MainActor in action() } }
+    }
+
+    private nonisolated static func barButton(title:String,action:@escaping @MainActor @Sendable () -> Void) -> CPBarButton {
+        CPBarButton(title:title,handler:controlHandler(action))
     }
 
     func templateApplicationScene(_ scene:CPTemplateApplicationScene,didDisconnect interfaceController:CPInterfaceController) {
