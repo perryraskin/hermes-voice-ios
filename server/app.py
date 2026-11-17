@@ -66,10 +66,14 @@ async def pair_device(request):
 
 async def capabilities(request):
     c = request.app['config']
-    return web.json_response({'profile':'voice','protocol':1,'fish_available':request.app['fish_trial'].ready,'ready':all(c.get(k) for k in ('HERMES_URL','HERMES_KEY','ELEVENLABS_KEY'))})
+    providers=[]
+    if request.app['fish_trial'].ready: providers.append('fish_live3')
+    if c.get('ELEVENLABS_KEY'): providers.append('elevenlabs')
+    return web.json_response({'profile':'voice','protocol':1,'voice_providers':providers,'fish_available':'fish_live3' in providers,'ready':bool(providers) and all(c.get(k) for k in ('HERMES_URL','HERMES_KEY'))})
 
 async def stream(request):
     c=request.app['config']; incoming=request.query.get('call_id'); context=None
+    if not c.get('ELEVENLABS_KEY'): raise web.HTTPServiceUnavailable(text='ElevenLabs voice is not configured')
     streaming_pcm=request.query.get('audio')=='pcm_24000'
     if incoming:
         context=request.app['attention'].store.context(incoming,time.time())

@@ -44,3 +44,18 @@ class SpeechTests(unittest.IsolatedAsyncioTestCase):
             def ws_connect(self,url,**kwargs): self.url=url;self.socket=Socket();return self.socket
         http=HTTP();result=await synthesize(http,'test','Hello')
         self.assertEqual(result,b'firstsecond');self.assertIn('eleven_v4_turbo',http.url);self.assertTrue(http.socket.sent[1]['close_socket'])
+
+class ProviderCapabilitiesTests(AioHTTPTestCase):
+    async def get_application(self):
+        return create_app({'ATTENTION_DB':':memory:','FISH_TRIAL_DB':':memory:','DEVICE_TOKEN':'test','HERMES_URL':'http://127.0.0.1','HERMES_KEY':'test','FISH_API_KEY':'test','FISH_AGENT_ID':'test','FISH_CALLBACK_KEY':'test'})
+    async def test_fish_only_ready_without_elevenlabs(self):
+        response=await self.client.get('/v1/capabilities',headers={'Authorization':'Bearer test'})
+        value=await response.json()
+        self.assertTrue(value['ready']);self.assertEqual(value['voice_providers'],['fish_live3'])
+        response=await self.client.get('/v1/stream',headers={'Authorization':'Bearer test'})
+        self.assertEqual(response.status,503)
+    async def test_no_provider_is_not_ready(self):
+        self.app['config']['FISH_API_KEY']=''
+        response=await self.client.get('/v1/capabilities',headers={'Authorization':'Bearer test'})
+        value=await response.json()
+        self.assertFalse(value['ready']);self.assertEqual(value['voice_providers'],[])

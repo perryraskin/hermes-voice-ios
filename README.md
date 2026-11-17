@@ -1,6 +1,6 @@
 # Hermes Voice iOS
 
-A minimal native iPhone and CarPlay voice client for a dedicated [Hermes Agent](https://github.com/NousResearch/hermes-agent) profile. Connect to the private host over Tailscale, with Fish Live 3 voice through WebRTC or ElevenLabs streaming speech. Incoming agent calls use CallKit and PushKit; no phone number is required.
+A minimal native iPhone and CarPlay voice client for a dedicated [Hermes Agent](https://github.com/NousResearch/hermes-agent) profile. Connect to a private host over Tailscale and choose a supported speech provider. Incoming agent calls use CallKit and PushKit; no phone number is required.
 
 <p align="center">
   <img src="docs/images/ready.png" width="30%" alt="Hermes ready to start a conversation" />
@@ -25,7 +25,7 @@ A minimal native iPhone and CarPlay voice client for a dedicated [Hermes Agent](
 - iOS 26.4 or later; Xcode with the corresponding SDK and XcodeGen.
 - A Mac running Hermes Agent with a dedicated `voice` profile and its native API.
 - Tailscale on the host and iPhone; HTTPS access through Tailscale Serve.
-- An ElevenLabs API key with speech recognition and synthesis permissions.
+- Credentials for at least one supported provider: Fish Audio or ElevenLabs. See [voice providers](#voice-providers).
 - Apple signing/provisioning supporting CarPlay Voice Based Conversation and push notifications. APNs credentials and a physical iPhone are required for incoming calls.
 
 ## Build
@@ -90,15 +90,26 @@ The plugin takes its session identity from Hermes' request context; the model ca
 
 Backend tests cover producer authentication, queue submission, deduplication, driving/opt-in gates, cooldown, confirmed decision return, acknowledgment, uncertain-delivery protection and speech payload handling. Swift unit tests cover private URL validation and stale audio after ending a session. A physical incoming-call test rang with working audio; vehicle audio, interruptions and the return-to-call flow need further hardware verification.
 
-Manual conversations stay in the Hermes interface; only incoming attention calls use CallKit. Updated clients request streamed 24 kHz PCM audio and feed incremental text into one Eleven v4 Turbo dialogue context per reply. Older clients retain complete MP3 sentence playback. Chris is the default conversational voice; private host configuration can override it. Consultation with other agents is a separate Hermes profile extension, not included here. Accepted-action recovery after a disconnect is not implemented; do not replay requests automatically. The current transcript stays in app memory; the host persists attention events, confirmed decisions, delivery acknowledgments and request metadata. ElevenLabs processes speech and Hermes processes conversation.
+Manual conversations stay in the Hermes interface; only incoming attention calls use CallKit. The ElevenLabs adapter requests streamed 24 kHz PCM audio and feed incremental text into one Eleven v4 Turbo dialogue context per reply. Older clients retain complete MP3 sentence playback. For the ElevenLabs adapter, model and voice defaults live in `server/speech.py` and private host configuration. Consultation with other agents is a separate Hermes profile extension, not included here. Accepted-action recovery after a disconnect is not implemented; do not replay requests automatically. The current transcript stays in app memory; the host persists attention events, confirmed decisions, delivery acknowledgments and request metadata. The selected provider processes speech and Hermes processes conversation.
 
 ## Project documentation
 
 Architecture, product specification, QA history and decisions live in the Markbase workspace `hermes-voice-ios`. See [AGENTS.md](AGENTS.md) for contributor discovery and documentation updates. This repository contains the app, private transport and public setup guide; it does not contain production credentials or private workspace exports.
 
-## Fish Live 3
+## Voice providers
 
-The native client also supports Fish Live 3 through LiveKit 2.9.0. Choose the engine in Settings; manual sessions keep the same Hermes interface. The selected engine also handles incoming attention calls. LiveKit defers audio activation to CallKit, while the same Hermes session supplies attention context and confirmed T3 decision returns.
+The app is provider-neutral; each supported provider has an explicit adapter because authentication, audio transport and interruption handling differ. Model and voice names are configuration details, not the app identity.
+
+| Provider | Current integration | Configuration |
+| --- | --- | --- |
+| Fish Audio | Live 3 agent with native LiveKit/WebRTC | Fish API key, published agent and authenticated custom-LLM callback |
+| ElevenLabs | Scribe realtime recognition and streaming speech synthesis through the private host | ElevenLabs API key and host voice configuration |
+
+Fish Audio is preferred when configured. The saved selection applies to manual conversations and incoming calls. If it is unavailable, the client chooses another supported provider advertised by the host; if none are supported, it reports an error. Existing saved provider IDs remain compatible. See [adding a voice provider](docs/voice-providers.md) for the extension points and validation requirements.
+
+### Fish Audio setup
+
+The Fish Audio adapter uses Live 3 through LiveKit 2.9.0. Choose the engine in Settings; manual sessions keep the same Hermes interface. The selected engine also handles incoming attention calls. LiveKit defers audio activation to CallKit, while the same Hermes session supplies attention context and confirmed T3 decision returns.
 
 Keep `FISH_API_KEY`, `FISH_AGENT_ID` and a separate random `FISH_CALLBACK_KEY` in the private host configuration. Provision a private Fish agent with `voice.engine=live3`, publish it, disable audio recording and speculative LLM responses, and set `conversation.max_duration_seconds` and private `FISH_SESSION_SECONDS` to 1800 seconds. Configure its custom LLM with a dedicated authenticated HTTPS callback; never expose the existing device or Hermes API. `server/fish_trial.py` serves only that callback on loopback port 12323. Device-authenticated `/v1/fish/sessions` mints short-lived LiveKit tokens. Callback sessions are locally minted, expire, and persist request deduplication to prevent provider retries executing native turns twice.
 

@@ -35,7 +35,7 @@ enum CredentialStore {
     @Published var token = CredentialStore.read()
     private var socket: URLSessionWebSocketTask?
     private var fishTransport:FishVoiceTransport?
-    private var fishAvailable=false
+    private var availableProviders:Set<VoiceProvider>=[]
     private var fishEntries:[String:UUID]=[:]
     var systemManagedAudio=false
     var audioActivated=true
@@ -97,13 +97,16 @@ enum CredentialStore {
     }
     func save() { do { _ = try baseURL(); try CredentialStore.save(token); UserDefaults.standard.set(host,forKey:"host"); error = "" } catch { self.error = error.localizedDescription } }
     func baseURL() throws -> URL { guard let u = URL(string:host), u.scheme == "https", u.host?.hasSuffix(".ts.net") == true, u.user == nil, u.password == nil, u.query == nil, u.fragment == nil else { throw NSError(domain:"Hermes",code:1,userInfo:[NSLocalizedDescriptionKey:"Enter your private HTTPS Tailscale host (.ts.net)."])}; return u }
-    func testConnection() async { do { var r = URLRequest(url:try baseURL().appendingPathComponent("v1/capabilities")); r.setValue("Bearer \(token)",forHTTPHeaderField:"Authorization"); r.timeoutInterval = 10; let (data,response) = try await PrivateHTTP.data(for:r); guard (response as? HTTPURLResponse)?.statusCode == 200, let cap = try JSONSerialization.jsonObject(with:data) as? [String:Any], cap["profile"] as? String == "voice", cap["ready"] as? Bool == true else { throw NSError(domain:"Hermes",code:2,userInfo:[NSLocalizedDescriptionKey:"The voice service is not ready or this device is not authorized."])}; fishAvailable=cap["fish_available"] as? Bool ?? false; connected = true; error = "" } catch { connected = false; self.error = error.localizedDescription } }
+    func testConnection() async { do { var r = URLRequest(url:try baseURL().appendingPathComponent("v1/capabilities")); r.setValue("Bearer \(token)",forHTTPHeaderField:"Authorization"); r.timeoutInterval = 10; let (data,response) = try await PrivateHTTP.data(for:r); guard (response as? HTTPURLResponse)?.statusCode == 200, let cap = try JSONSerialization.jsonObject(with:data) as? [String:Any], cap["profile"] as? String == "voice", cap["ready"] as? Bool == true else { throw NSError(domain:"Hermes",code:2,userInfo:[NSLocalizedDescriptionKey:"The voice service is not ready or this device is not authorized."])}; availableProviders=VoiceProvider.available(in:cap); connected = true; error = "" } catch { connected = false; self.error = error.localizedDescription } }
     func start() async {
         guard !active, !starting else { return }; starting=true; defer { starting=false }; let attempt=generation; save(); guard error.isEmpty else { return }
         activityIdentifier=UUID();activityStartedAt=Date();state = .connecting; await testConnection(); guard generation == attempt else { return }; guard connected else { state = .failed; return }
         guard await AVAudioApplication.requestRecordPermission() else { error = "Allow microphone access in iPhone Settings."; state = .failed; return }
         guard generation == attempt else { return }
-        if fishAvailable && UserDefaults.standard.string(forKey:"voiceProvider") != "elevenlabs" {
+        guard let provider=VoiceProvider.resolve(preference:UserDefaults.standard.string(forKey:VoiceProvider.preferenceKey),available:availableProviders) else {
+            state = .failed;error="No supported voice provider is configured on your private host.";return
+        }
+        if provider == .fish {
             let epoch=UUID();generation=epoch;entries=[];fishEntries=[:];muted=false
             do {
                 let transport=FishVoiceTransport(session:self,host:try baseURL(),credential:token);fishTransport=transport
