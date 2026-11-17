@@ -92,7 +92,7 @@ import AVFoundation
             Task { @MainActor in
                 defer { completion() }
                 guard let self,error==nil else { return }
-                guard self.callID==nil,let identifier else { self.provider.reportCall(with:id,endedAt:Date(),reason:.failed);return }
+                guard self.callID==nil,!SharedRuntime.session.active,let identifier else { self.provider.reportCall(with:id,endedAt:Date(),reason:.failed);return }
                 self.callID=id;self.incomingID=identifier
             }
         }

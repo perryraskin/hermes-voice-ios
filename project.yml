@@ -16,11 +16,17 @@ settings:
     GENERATE_INFOPLIST_FILE: YES
     SWIFT_VERSION: '5.0'
     DEVELOPMENT_TEAM: "$(HERMES_DEVELOPMENT_TEAM)"
+packages:
+  LiveKit:
+    url: https://github.com/livekit/client-sdk-swift.git
+    exactVersion: 2.9.0
 targets:
   HermesVoice:
     type: application
     platform: iOS
     sources: [Sources]
+    dependencies:
+      - package: LiveKit
     info:
       path: Info.plist
       properties:

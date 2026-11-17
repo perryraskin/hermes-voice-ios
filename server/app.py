@@ -4,6 +4,7 @@ from pathlib import Path
 from speech import synthesize, stream_dialogue
 import attention
 import returns
+import fish_trial
 import logging
 from logging.handlers import RotatingFileHandler
 from aiohttp import web, ClientSession, ClientTimeout, WSMsgType
@@ -61,7 +62,7 @@ async def pair_device(request):
 
 async def capabilities(request):
     c = request.app['config']
-    return web.json_response({'profile':'voice','protocol':1,'ready':all(c.get(k) for k in ('HERMES_URL','HERMES_KEY','ELEVENLABS_KEY'))})
+    return web.json_response({'profile':'voice','protocol':1,'fish_available':request.app['fish_trial'].ready,'ready':all(c.get(k) for k in ('HERMES_URL','HERMES_KEY','ELEVENLABS_KEY'))})
 
 async def stream(request):
     c=request.app['config']; incoming=request.query.get('call_id'); context=None
@@ -198,6 +199,7 @@ def create_app(config=None):
     app['request_log']=log
     app.router.add_get('/health',health)
     attention.install(app,app['config'])
+    fish_trial.install(app,app['config'])
     returns.install(app,app['config'])
     app.router.add_get('/pair/{code}',pair_page); app.router.add_post('/v1/pair',pair_device); app.router.add_get('/v1/capabilities',capabilities); app.router.add_get('/v1/stream',stream)
     return app

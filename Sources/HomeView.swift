@@ -139,13 +139,14 @@ struct TranscriptView: View {
     }
 }
 struct SettingsView: View {
+    @AppStorage("voiceProvider") private var voiceProvider="fish_live3"
     @EnvironmentObject var session:VoiceSession
     @Environment(\.dismiss) var dismiss
     var body:some View { NavigationStack { Form {
         Section("Private connection") { if !session.error.isEmpty { Text(session.error).font(.footnote).foregroundStyle(.orange) }; TextField("https://your-host.tailnet.ts.net:port",text:$session.host).textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL).accessibilityLabel("Private host URL"); SecureField("Device credential",text:$session.token).accessibilityLabel("Device credential"); Button("Test connection") { session.save(); Task { await session.testConnection() } }; Label(session.connected ? "Connected to Hermes Voice":"Not connected",systemImage:session.connected ? "checkmark.circle":"network") }
         Section { NavigationLink("Calls & attention") { AttentionSettingsView() } }
-        Section("Voice") { LabeledContent("Provider",value:"ElevenLabs"); LabeledContent("Agent",value:"Hermes Voice"); Text("Voice selection is managed by your private host.").font(.footnote).foregroundStyle(.secondary) }
-        Section("Privacy") { Text("Audio is sent through your private Tailscale connection during conversations you start. Your host uses ElevenLabs for speech recognition and playback. Hermes handles the conversation. This app keeps the current transcript in memory and does not save audio.").font(.footnote) }
+        Section("Voice") { Picker("Voice engine",selection:$voiceProvider) { Text("Fish Live 3 trial").tag("fish_live3"); Text("ElevenLabs v4").tag("elevenlabs") }.disabled(session.active); LabeledContent("Agent",value:"Hermes Voice"); Text("Fish is used when the private host has the trial configured. Incoming attention calls continue to use ElevenLabs.").font(.footnote).foregroundStyle(.secondary) }
+        Section("Privacy") { Text("Tailscale connects to your private host. ElevenLabs conversations relay speech through the host; Fish Live 3 streams speech directly to Fish using short-lived WebRTC credentials. Hermes supplies replies through a dedicated authenticated callback. Fish trial audio recording is disabled. This app keeps the current transcript in memory.").font(.footnote) }
         if !session.error.isEmpty { Section("Connection details") { Text(session.error).foregroundStyle(.orange) } }
         Section { Button("Forget this device",role:.destructive) { session.end(); session.token=""; session.host=""; try? CredentialStore.save(""); UserDefaults.standard.removeObject(forKey:"host"); session.connected=false } }
     }.navigationTitle("Settings").toolbar { Button("Done") { if session.host.isEmpty && session.token.isEmpty { session.error=""; dismiss() } else { session.save(); if session.error.isEmpty { dismiss() } } } } } }

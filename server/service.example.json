@@ -12,5 +12,9 @@
   "APNS_KEY_ID": "",
   "APNS_TEAM_ID": "",
   "T3_CLI_PATH": "",
-  "VOICE_TOOL_TOKEN": ""
+  "VOICE_TOOL_TOKEN": "",
+  "FISH_API_KEY": "",
+  "FISH_AGENT_ID": "",
+  "FISH_CALLBACK_KEY": "",
+  "FISH_CALLBACK_URL": ""
 }

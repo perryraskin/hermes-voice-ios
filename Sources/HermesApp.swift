@@ -32,6 +32,9 @@ enum CredentialStore {
     @Published var host = UserDefaults.standard.string(forKey:"host") ?? ""
     @Published var token = CredentialStore.read()
     private var socket: URLSessionWebSocketTask?
+    private var fishTransport:FishVoiceTransport?
+    private var fishAvailable=false
+    private var fishEntries:[String:UUID]=[:]
     var systemManagedAudio=false
     var audioActivated=true
     var attentionCallID:String?
@@ -62,7 +65,7 @@ enum CredentialStore {
         #if DEBUG
         if showcaseActive { return true }
         #endif
-        return socket != nil
+        return socket != nil || fishTransport != nil
     }
     var label: String { muted && active ? "Muted" : state.rawValue }
     var hint: String { muted && active ? "Your microphone is paused." : state.hint }
@@ -92,12 +95,21 @@ enum CredentialStore {
     }
     func save() { do { _ = try baseURL(); try CredentialStore.save(token); UserDefaults.standard.set(host,forKey:"host"); error = "" } catch { self.error = error.localizedDescription } }
     func baseURL() throws -> URL { guard let u = URL(string:host), u.scheme == "https", u.host?.hasSuffix(".ts.net") == true, u.user == nil, u.password == nil, u.query == nil, u.fragment == nil else { throw NSError(domain:"Hermes",code:1,userInfo:[NSLocalizedDescriptionKey:"Enter your private HTTPS Tailscale host (.ts.net)."])}; return u }
-    func testConnection() async { do { var r = URLRequest(url:try baseURL().appendingPathComponent("v1/capabilities")); r.setValue("Bearer \(token)",forHTTPHeaderField:"Authorization"); r.timeoutInterval = 10; let (data,response) = try await PrivateHTTP.data(for:r); guard (response as? HTTPURLResponse)?.statusCode == 200, let cap = try JSONSerialization.jsonObject(with:data) as? [String:Any], cap["profile"] as? String == "voice", cap["ready"] as? Bool == true else { throw NSError(domain:"Hermes",code:2,userInfo:[NSLocalizedDescriptionKey:"The voice service is not ready or this device is not authorized."])}; connected = true; error = "" } catch { connected = false; self.error = error.localizedDescription } }
+    func testConnection() async { do { var r = URLRequest(url:try baseURL().appendingPathComponent("v1/capabilities")); r.setValue("Bearer \(token)",forHTTPHeaderField:"Authorization"); r.timeoutInterval = 10; let (data,response) = try await PrivateHTTP.data(for:r); guard (response as? HTTPURLResponse)?.statusCode == 200, let cap = try JSONSerialization.jsonObject(with:data) as? [String:Any], cap["profile"] as? String == "voice", cap["ready"] as? Bool == true else { throw NSError(domain:"Hermes",code:2,userInfo:[NSLocalizedDescriptionKey:"The voice service is not ready or this device is not authorized."])}; fishAvailable=cap["fish_available"] as? Bool ?? false; connected = true; error = "" } catch { connected = false; self.error = error.localizedDescription } }
     func start() async {
         guard !active, !starting else { return }; starting=true; defer { starting=false }; let attempt=generation; save(); guard error.isEmpty else { return }
         state = .connecting; await testConnection(); guard generation == attempt else { return }; guard connected else { state = .failed; return }
         guard await AVAudioApplication.requestRecordPermission() else { error = "Allow microphone access in iPhone Settings."; state = .failed; return }
         guard generation == attempt else { return }
+        if fishAvailable && attentionCallID == nil && UserDefaults.standard.string(forKey:"voiceProvider") != "elevenlabs" {
+            let epoch=UUID();generation=epoch;entries=[];fishEntries=[:];muted=false
+            do {
+                let transport=FishVoiceTransport(session:self,host:try baseURL(),credential:token);fishTransport=transport
+                try await transport.start()
+                guard generation == epoch else { transport.end();return }
+            } catch { guard generation == epoch else { return };end();state = .failed;self.error=error.localizedDescription }
+            return
+        }
         do { var u = URLComponents(url:try baseURL().appendingPathComponent("v1/stream"),resolvingAgainstBaseURL:false)!; u.scheme = "wss"; u.queryItems=[URLQueryItem(name:"audio",value:"pcm_24000")]; if let attentionCallID { u.queryItems?.append(URLQueryItem(name:"call_id",value:attentionCallID)) }; var r = URLRequest(url:u.url!); r.setValue("Bearer \(token)",forHTTPHeaderField:"Authorization"); let ws = URLSession.shared.webSocketTask(with:r); socket = ws; ws.resume(); generation = UUID(); let epoch = generation; entries = []; muted = false
             receiveTask = Task { do { while !Task.isCancelled { let msg = try await ws.receive(); guard self.generation == epoch else { return }; if case .string(let str) = msg { try self.handle(JSONDecoder().decode(WireEvent.self,from:Data(str.utf8))) } } } catch { guard self.generation == epoch else { return }; self.end(); self.connected=false; self.state = .failed; self.error = "Connection interrupted. Check your last request before trying again." } }
         } catch { end(); state = .failed; self.error = error.localizedDescription }
@@ -155,13 +167,19 @@ enum CredentialStore {
     }
     func send(_ value:[String:String]) { guard let socket,let data=try? JSONSerialization.data(withJSONObject:value),let str=String(data:data,encoding:.utf8) else { return }; guard pendingSends < 8 || value["type"] != "audio" else { return }; pendingSends += 1; let epoch = generation; socket.send(.string(str)) { [weak self] _ in Task { @MainActor in guard let self, self.generation == epoch else { return }; self.pendingSends = max(0,self.pendingSends-1) } } }
     func toggleMute() { SystemCalls.shared.setMuted(!muted) }
-    func setMuted(_ value:Bool) { muted=value;level=0;send(["type":muted ? "mute":"unmute"]) }
+    func setMuted(_ value:Bool) { if let fishTransport { fishTransport.setMuted(value);return };muted=value;level=0;send(["type":muted ? "mute":"unmute"]) }
     func pause() { guard active else { return }; end(); state = .paused }
     func end() {
         #if DEBUG
         showcaseActive=false
         #endif
+        fishTransport?.end();fishTransport=nil;fishEntries=[:]
         generation=UUID(); pendingSends=0; turn=nil; receiveTask?.cancel(); receiveTask=nil; socket?.cancel(with:.normalClosure,reason:nil); socket=nil; if let engineObserver { NotificationCenter.default.removeObserver(engineObserver);self.engineObserver=nil };stopPlayback();pcmPlayer=nil; engine?.stop(); engine?.inputNode.removeTap(onBus:0); engine=nil; player?.stop(); player=nil; stopMetering(); audioQueue=[]; voiceFrames=0; level=0; muted=false; state = .ready; recognitionReady=false;attentionCallID=nil;if !systemManagedAudio { try? AVAudioSession.sharedInstance().setActive(false,options:.notifyOthersOnDeactivation) };onEnded?();systemManagedAudio=false;audioActivated=true }
+    func receiveFishTranscript(id:String,role:String,text:String) {
+        guard fishTransport != nil else { return }
+        if let entry=fishEntries[id],let index=entries.firstIndex(where:{$0.id==entry}) { entries[index].text=text }
+        else { let entry=TranscriptEntry(role:role,text:text);fishEntries[id]=entry.id;entries.append(entry) }
+    }
     func stopPlayback() {
         playbackGeneration=UUID();pcmPending=0;pcmQueue=[];pcmRemainder=Data();pcmPlayer?.stop()
         player?.stop();player=nil;audioQueue=[];stopMetering()
