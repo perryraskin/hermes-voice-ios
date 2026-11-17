@@ -1,6 +1,6 @@
 # Hermes Voice iOS
 
-A minimal native iPhone and CarPlay voice client for a dedicated [Hermes Agent](https://github.com/NousResearch/hermes-agent) profile. Talk through a private Tailscale connection, with ElevenLabs speech recognition and voice output. Incoming agent calls use CallKit and PushKit; no phone number is required.
+A minimal native iPhone and CarPlay voice client for a dedicated [Hermes Agent](https://github.com/NousResearch/hermes-agent) profile. Connect to the private host over Tailscale, with Fish Live 3 voice through WebRTC or ElevenLabs streaming speech. Incoming agent calls use CallKit and PushKit; no phone number is required.
 
 <p align="center">
   <img src="docs/images/ready.png" width="30%" alt="Hermes ready to start a conversation" />
@@ -14,7 +14,8 @@ A minimal native iPhone and CarPlay voice client for a dedicated [Hermes Agent](
 
 - Continuous conversation, live transcript, audio-reactive waveform, mute and interruption handling.
 - A dedicated Hermes voice profile instead of a second conversational agent relaying each request.
-- Native CarPlay voice controls sharing the iPhone's current session.
+- Native CarPlay with prominent Start/Mute/End controls, sage state animations and the iPhone's shared session.
+- Lock Screen and Dynamic Island Live Activities with status, timer and session controls.
 - CallKit integration: answer an incoming call and open Hermes to the ongoing session.
 - A private attention queue for agents. Calls require owner opt-in, a fresh driving signal, an urgent decision due within 30 minutes, and push availability. Offers are deduplicated and rate limited.
 - A Shortcuts action, **Set Hermes Driving Status**, for CarPlay connect/disconnect automations.
@@ -104,3 +105,9 @@ Keep `FISH_API_KEY`, `FISH_AGENT_ID` and a separate random `FISH_CALLBACK_KEY` i
 `server/fish_tunnel.py` optionally maintains a Cloudflare quick tunnel for that callback and republishes the agent's callback URL when the tunnel restarts. Its launch service is a local deployment choice, not configured by cloning this repository. A tunnel restart can interrupt an ongoing session. The native Hermes endpoint remains private. Fish audio goes directly over WebRTC; the API key stays on the host. Fish sessions need no phone number and does not automatically purchase credit.
 
 For incoming Fish calls, the device sends the attention call ID when minting the session. The private host validates that call, binds the native session to its fixed decision origin and supplies its opening question. Authenticated provider callbacks record each new owner utterance once through a separate private observation endpoint. Read-back, a newer explicit confirmation, delivery receipt and task acknowledgment remain separate stages. Ending the session closes its decision binding. Callback credentials cannot publish attention events or mint device sessions.
+
+## CarPlay interface
+
+Hermes uses Apple’s voice conversation template with prominent Start, Cancel, Mute/Unmute and End actions. Sage animations distinguish connecting, listening, thinking and speaking; muted, paused and unavailable states use clear static symbols. The animation conveys conversation state, not live microphone amplitude. Short prompts match the iPhone experience, and manual conversations stay inside Hermes. Navigation-bar controls remain available for vehicle hardware focus.
+
+CarPlay controls layout and text fitting. iOS 27 adds Hermes’ dark custom background; iOS 26.4–26.x uses the system template background. The full iPhone transcript and SwiftUI layout are not displayed on the vehicle screen. All app and service source changes are committed here; credentials and machine-specific configuration remain private, while specifications and QA records are updated in Markbase alongside releases.

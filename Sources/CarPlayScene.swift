@@ -25,15 +25,6 @@ struct CarPlaySnapshot: Equatable {
     private var changes: AnyCancellable?
     private var presented=false
     private var lastSnapshot: CarPlaySnapshot?
-    private static let artwork: UIImage = {
-        // Rasterize the SF Symbol so the XPC template receives a concrete image.
-        let renderer=UIGraphicsImageRenderer(size:CGSize(width:150,height:150))
-        return renderer.image { _ in
-            UIImage(systemName:"waveform")?.withTintColor(.systemGreen,renderingMode:.alwaysOriginal)
-                .draw(in:CGRect(x:15,y:15,width:120,height:120))
-        }
-    }()
-
     static func makeTemplate(current: VoiceState, active: Bool = false, muted: Bool = false) -> CPVoiceControlTemplate {
         // CarPlay discards every state after the first five. Always include the
         // current state first; replace the template for an uncached state.
@@ -41,8 +32,18 @@ struct CarPlaySnapshot: Equatable {
         for state in [VoiceState.ready,.connecting,.listening,.thinking,.speaking,.paused,.failed] where !states.contains(state) {
             states.append(state)
         }
-        let template=CPVoiceControlTemplate(voiceControlStates:states.prefix(5).map {
-            CPVoiceControlState(identifier:$0.rawValue,titleVariants:[$0.rawValue],image:artwork,repeats:false)
+        let template=CPVoiceControlTemplate(voiceControlStates:states.prefix(5).map { state in
+            let isMuted=muted && active && [.listening,.thinking,.speaking].contains(state)
+            let image=CarPlayArtwork.image(state:state,muted:isMuted)
+            let titles=titleVariants(state:state,muted:isMuted)
+            let voice:CPVoiceControlState
+            if #available(iOS 27.0,*) {
+                voice=CPVoiceControlState(identifier:state.rawValue,titleVariants:titles,image:image,backgroundImage:CarPlayArtwork.background,repeats:image.images != nil)
+            } else {
+                voice=CPVoiceControlState(identifier:state.rawValue,titleVariants:titles,image:image,repeats:image.images != nil)
+            }
+            voice.actionButtons=actionButtons(state:state,active:[.listening,.thinking,.speaking].contains(state),muted:isMuted)
+            return voice
         })
         configureControls(template,snapshot:CarPlaySnapshot(state:current,active:active,muted:muted))
         return template
@@ -82,6 +83,10 @@ struct CarPlaySnapshot: Equatable {
         // Audio meters publish frequently. Only send actual UI state changes
         // across CarPlay's XPC connection, rather than rebuilding controls per frame.
         guard snapshot != lastSnapshot else { return }
+        // Muting changes immutable artwork and prompts, so rebuild once for it.
+        if let lastSnapshot,lastSnapshot.muted != snapshot.muted || lastSnapshot.active != snapshot.active {
+            installTemplate();return
+        }
         guard template.voiceControlStates.contains(where:{$0.identifier==snapshot.state.rawValue}) else {
             installTemplate();return
         }
@@ -90,6 +95,37 @@ struct CarPlaySnapshot: Equatable {
             template.activateVoiceControlState(withIdentifier:snapshot.state.rawValue)
         }
         Self.configureControls(template,snapshot:snapshot)
+    }
+
+    static func titleVariants(state:VoiceState,muted:Bool)->[String] {
+        if muted { return ["Microphone paused · Unmute when you’re ready", "Microphone paused", "Muted"] }
+        switch state {
+        case .ready:return ["Hermes · A little space to think out loud", "Start a conversation", "Hermes"]
+        case .connecting:return ["Connecting to Hermes…", "Connecting…"]
+        case .listening:return ["Listening · Take your time. I’m here.", "Listening"]
+        case .thinking:return ["Thinking · Working on that", "Thinking"]
+        case .speaking:return ["Speaking · You can interrupt me", "Speaking"]
+        case .paused:return ["Paused · Resume when you’re ready", "Paused"]
+        case .failed:return ["Check your private connection on iPhone", "Connection unavailable"]
+        }
+    }
+
+    static func actionButtons(state:VoiceState,active:Bool,muted:Bool)->[CPButton] {
+        if state == .connecting { return [actionButton("Cancel",symbol:"xmark") { SystemCalls.shared.end() }] }
+        if active && [.listening,.thinking,.speaking].contains(state) {
+            return [actionButton(muted ? "Unmute":"Mute",symbol:muted ? "mic.slash.fill":"mic.fill") {
+                SystemCalls.shared.setMuted(!SharedRuntime.session.muted)
+            },actionButton("End",symbol:"stop.fill") { SystemCalls.shared.end() }]
+        }
+        return [actionButton(state == .paused ? "Resume":state == .failed ? "Try again":"Start",symbol:"mic.fill") { SystemCalls.shared.start() }]
+    }
+    private static func actionButton(_ title:String,symbol:String,action:@escaping @MainActor @Sendable ()->Void)->CPButton {
+        let image=UIImage(systemName:symbol)!.withTintColor(CarPlayArtwork.sage,renderingMode:.alwaysOriginal)
+        let button=CPButton(image:image,handler:actionHandler(action));button.title=title
+        return button
+    }
+    nonisolated static func actionHandler(_ action:@escaping @MainActor @Sendable ()->Void)->@Sendable (CPButton)->Void {
+        { _ in Task { @MainActor in action() } }
     }
 
     static func configureControls(_ template:CPVoiceControlTemplate,snapshot:CarPlaySnapshot) {
