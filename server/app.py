@@ -1,7 +1,7 @@
 """Private deterministic speech transport. No reasoning model or tool router here."""
 import asyncio, base64, hmac, json, os, uuid, re, time
 from pathlib import Path
-from speech import synthesize
+from speech import synthesize, stream_dialogue
 import attention
 import returns
 import logging
@@ -65,6 +65,7 @@ async def capabilities(request):
 
 async def stream(request):
     c=request.app['config']; incoming=request.query.get('call_id'); context=None
+    streaming_pcm=request.query.get('audio')=='pcm_24000'
     if incoming:
         context=request.app['attention'].store.context(incoming,time.time())
         if not context:raise web.HTTPGone()
@@ -80,35 +81,55 @@ async def stream(request):
             # Serialize native runs: interruption cancels playback, not a possibly executing action.
             async with lock:
                 try:
-                    pending=''
-                    async def speak(sentence):
-                        if version != revision: return
-                        await emit('text',text=sentence,turn=turn)
-                        voice=c.get('VOICE_ID','JBFqnCBsd6RMkjVDRZzb')
-                        audio=await synthesize(http,c['ELEVENLABS_KEY'],sentence,voice)
-                        if version == revision: await emit('audio',audio=base64.b64encode(audio).decode(),turn=turn)
-                    async with http.post(c['HERMES_URL'].rstrip('/')+'/chat/completions',headers={'Authorization':'Bearer '+c['HERMES_KEY'],'X-Hermes-Session-Id':session_id},json={'model':'hermes-agent','model_options':{'reasoning_effort':'low','service_tier':'priority'},'stream':True,'messages':[{'role':'user','content':text}]}) as r:
-                        r.raise_for_status()
-                        async for raw in r.content:
-                            line=raw.decode().strip()
-                            if not line.startswith('data:'): continue
-                            value=line[5:].strip()
-                            if value=='[DONE]': break
-                            data=json.loads(value)
-                            choices=data.get('choices',[])
-                            if not choices: continue
-                            pending+=choices[0].get('delta',{}).get('content','') or ''
-                            if version != revision: continue
+                    started=time.monotonic();first_text=None;first_audio=None
+                    voice=c.get('VOICE_ID','iP95p4xoKVk53GoZ742B')
+                    async def model_text():
+                        nonlocal first_text
+                        async with http.post(c['HERMES_URL'].rstrip('/')+'/chat/completions',headers={'Authorization':'Bearer '+c['HERMES_KEY'],'X-Hermes-Session-Id':session_id},json={'model':'hermes-agent','model_options':{'reasoning_effort':'low','service_tier':'priority'},'stream':True,'messages':[{'role':'user','content':text}]}) as r:
+                            r.raise_for_status()
+                            async for raw in r.content:
+                                line=raw.decode().strip()
+                                if not line.startswith('data:'):continue
+                                value=line[5:].strip()
+                                if value=='[DONE]':break
+                                choices=json.loads(value).get('choices',[])
+                                if not choices:continue
+                                delta=choices[0].get('delta',{}).get('content','') or ''
+                                if not delta:continue
+                                if first_text is None:first_text=time.monotonic()-started
+                                # Continue draining the native run after an interruption.
+                                # It may have already executed a tool; do not replay it.
+                                if version != revision:continue
+                                if streaming_pcm:await emit('text_delta',text=delta,turn=turn)
+                                yield delta
+                    if streaming_pcm:
+                        async for audio in stream_dialogue(http,c['ELEVENLABS_KEY'],model_text(),voice):
+                            if version != revision:continue
+                            if first_audio is None:first_audio=time.monotonic()-started
+                            await emit('pcm_audio',audio=base64.b64encode(audio).decode(),turn=turn)
+                    else:
+                        pending=''
+                        async def speak(sentence):
+                            nonlocal first_audio
+                            if version != revision:return
+                            await emit('text',text=sentence,turn=turn)
+                            audio=await synthesize(http,c['ELEVENLABS_KEY'],sentence,voice)
+                            if version == revision:
+                                if first_audio is None:first_audio=time.monotonic()-started
+                                await emit('audio',audio=base64.b64encode(audio).decode(),turn=turn)
+                        async for delta in model_text():
+                            pending+=delta
                             match=re.search(r'[.!?](?:\s|$)',pending)
                             if match:
-                                end=match.end(); await speak(pending[:end]); pending=pending[end:]
-                        if pending.strip() and version == revision: await speak(pending)
+                                end=match.end();await speak(pending[:end]);pending=pending[end:]
+                        if pending.strip():await speak(pending)
+                    request.app['request_log'].info('voice_turn format=%s first_text_ms=%s first_audio_ms=%s', 'pcm' if streaming_pcm else 'mp3',round(first_text*1000) if first_text is not None else '-',round(first_audio*1000) if first_audio is not None else '-')
                 except Exception:
                     if version == revision: await emit('error',text='The request or voice playback failed. Check the transcript before repeating an action.')
                 finally:
                     if version == revision: await emit('done',turn=turn)
         try:
-            url='https://api.elevenlabs.io/v1/speech-to-text/realtime?model_id=scribe_v2_realtime&audio_format=pcm_16000&commit_strategy=vad&vad_silence_threshold_secs=0.9'
+            url='https://api.elevenlabs.io/v1/speech-to-text/realtime?model_id=scribe_v2_realtime&audio_format=pcm_16000&commit_strategy=vad&vad_silence_threshold_secs=0.7'
             async with http.ws_connect(url,headers={'xi-api-key':c['ELEVENLABS_KEY']},max_msg_size=256*1024) as stt:
                 async def receive_stt():
                     nonlocal revision,current

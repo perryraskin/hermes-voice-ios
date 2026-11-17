@@ -24,16 +24,11 @@ import AVFoundation
         if registry==nil { let r=PKPushRegistry(queue:.main);r.delegate=self;r.desiredPushTypes=[.voIP];registry=r }
         #endif
     }
+    // User-initiated conversations stay in Hermes. CallKit is reserved for
+    // genuine incoming attention calls delivered by PushKit.
     func start() {
-        #if targetEnvironment(simulator)
+        guard callID == nil else { return }
         Task { await SharedRuntime.session.start() }
-        #else
-        guard callID==nil else { return }
-        let id=UUID();callID=id;SharedRuntime.session.state = .connecting;let action=CXStartCallAction(call:id,handle:CXHandle(type:.generic,value:"Hermes"));action.isVideo=false
-        controller.request(CXTransaction(action:action)) { error in
-            if let error { Task { @MainActor in self.callID=nil;SharedRuntime.session.state = .failed;SharedRuntime.session.error=error.localizedDescription } }
-        }
-        #endif
     }
     func end() {
         guard let id=callID else { SharedRuntime.session.end();return }
@@ -44,12 +39,6 @@ import AVFoundation
     func setMuted(_ muted:Bool) {
         guard let id=callID else { SharedRuntime.session.setMuted(muted);return }
         controller.request(CXTransaction(action:CXSetMutedCallAction(call:id,muted:muted))) { _ in }
-    }
-    func provider(_ provider:CXProvider,perform action:CXStartCallAction) {
-        guard callID==action.callUUID else { action.fail();return };callID=action.callUUID
-        SharedRuntime.session.systemManagedAudio=true;SharedRuntime.session.audioActivated=false
-        provider.reportOutgoingCall(with:action.callUUID,startedConnectingAt:Date());action.fulfill()
-        beginConnection()
     }
     private func beginConnection() {
         startupTimer?.invalidate();startupTimer=Timer.scheduledTimer(withTimeInterval:25,repeats:false) { [weak self] _ in Task { @MainActor in self?.answerAction?.fail();self?.answerAction=nil;SharedRuntime.session.end();SharedRuntime.session.error="The call could not connect. Check Tailscale and try again." } }

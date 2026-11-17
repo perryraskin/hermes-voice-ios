@@ -40,6 +40,12 @@ enum CredentialStore {
     private var recognitionReady=false
     private var engine: AVAudioEngine?
     private var player: AVAudioPlayer?
+    private var pcmPlayer: AVAudioPlayerNode?
+    private var pcmQueue: [Data] = []
+    private var pcmPending = 0
+    private var pcmRemainder = Data()
+    private var playbackGeneration = UUID()
+    private let pcmFormat=AVAudioFormat(commonFormat:.pcmFormatFloat32,sampleRate:24000,channels:1,interleaved:false)!
     private var audioQueue: [Data] = []
     private var voiceFrames = 0
     private var generation = UUID()
@@ -51,6 +57,7 @@ enum CredentialStore {
     private var showcaseActive = false
     #endif
     private var observer: NSObjectProtocol?
+    private var engineObserver: NSObjectProtocol?
     var active: Bool {
         #if DEBUG
         if showcaseActive { return true }
@@ -91,7 +98,7 @@ enum CredentialStore {
         state = .connecting; await testConnection(); guard generation == attempt else { return }; guard connected else { state = .failed; return }
         guard await AVAudioApplication.requestRecordPermission() else { error = "Allow microphone access in iPhone Settings."; state = .failed; return }
         guard generation == attempt else { return }
-        do { var u = URLComponents(url:try baseURL().appendingPathComponent("v1/stream"),resolvingAgainstBaseURL:false)!; u.scheme = "wss"; if let attentionCallID { u.queryItems=[URLQueryItem(name:"call_id",value:attentionCallID)] }; var r = URLRequest(url:u.url!); r.setValue("Bearer \(token)",forHTTPHeaderField:"Authorization"); let ws = URLSession.shared.webSocketTask(with:r); socket = ws; ws.resume(); generation = UUID(); let epoch = generation; entries = []; muted = false
+        do { var u = URLComponents(url:try baseURL().appendingPathComponent("v1/stream"),resolvingAgainstBaseURL:false)!; u.scheme = "wss"; u.queryItems=[URLQueryItem(name:"audio",value:"pcm_24000")]; if let attentionCallID { u.queryItems?.append(URLQueryItem(name:"call_id",value:attentionCallID)) }; var r = URLRequest(url:u.url!); r.setValue("Bearer \(token)",forHTTPHeaderField:"Authorization"); let ws = URLSession.shared.webSocketTask(with:r); socket = ws; ws.resume(); generation = UUID(); let epoch = generation; entries = []; muted = false
             receiveTask = Task { do { while !Task.isCancelled { let msg = try await ws.receive(); guard self.generation == epoch else { return }; if case .string(let str) = msg { try self.handle(JSONDecoder().decode(WireEvent.self,from:Data(str.utf8))) } } } catch { guard self.generation == epoch else { return }; self.end(); self.connected=false; self.state = .failed; self.error = "Connection interrupted. Check your last request before trying again." } }
         } catch { end(); state = .failed; self.error = error.localizedDescription }
     }
@@ -101,8 +108,10 @@ enum CredentialStore {
     case "partial": if let t=e.text { if entries.last?.role == "You" && state == .listening { entries[entries.count-1].text=t } else { entries.append(.init(role:"You",text:t)) } }
     case "committed": turn=e.turn; state = .thinking; if let t=e.text { if entries.last?.role == "You" { entries[entries.count-1].text=t } else { entries.append(.init(role:"You",text:t)) } }
     case "text": guard e.turn == turn else { return }; if entries.last?.role == "Hermes" { entries[entries.count-1].text += " " + (e.text ?? "") } else { entries.append(.init(role:"Hermes",text:e.text ?? "")) }
+    case "text_delta": guard e.turn == turn else { return };if entries.last?.role == "Hermes" { entries[entries.count-1].text += e.text ?? "" } else { entries.append(.init(role:"Hermes",text:e.text ?? "")) }
     case "audio": guard e.turn == turn, let s=e.audio,let d=Data(base64Encoded:s) else { return }; audioQueue.append(d); try playNext()
-    case "interrupted": player?.stop(); player=nil; stopMetering(); audioQueue=[]; turn=nil; state = .listening
+    case "pcm_audio": guard e.turn == turn,let s=e.audio,let d=Data(base64Encoded:s),!d.isEmpty else { return };pcmRemainder.append(d);let count=pcmRemainder.count & ~1;if count > 0 { pcmQueue.append(Data(pcmRemainder.prefix(count)));pcmRemainder.removeFirst(count);playPCM() }
+    case "interrupted": stopPlayback(); turn=nil; state = .listening
     case "done": if state != .speaking { state = .listening }
     case "error": error=e.text ?? "Voice is unavailable."; state = .listening
     default: break
@@ -110,13 +119,28 @@ enum CredentialStore {
     func beginCaptureIfReady() throws {
         guard recognitionReady,(!systemManagedAudio || audioActivated) else { return }
         if let engine { try engine.start() } else { try capture() }
-        state = .listening
+        if pcmPending == 0 { state = .listening };playPCM()
     }
-    func suspendSystemAudio() { audioActivated=false;engine?.stop();player?.pause() }
+    func suspendSystemAudio() { audioActivated=false;engine?.stop();player?.pause();pcmPlayer?.pause() }
     func capture() throws {
         let audio = AVAudioSession.sharedInstance(); try audio.setCategory(.playAndRecord,mode:.voiceChat,options:[.defaultToSpeaker,.allowBluetoothHFP]); if !systemManagedAudio { try audio.setActive(true) }
         let engine=AVAudioEngine(); self.engine=engine; try engine.inputNode.setVoiceProcessingEnabled(true)
+        if let engineObserver { NotificationCenter.default.removeObserver(engineObserver) }
+        engineObserver=NotificationCenter.default.addObserver(forName:.AVAudioEngineConfigurationChange,object:engine,queue:.main) { [weak self] _ in
+            Task { @MainActor in
+                guard let self,self.active,self.engine === engine,(!self.systemManagedAudio || self.audioActivated) else { return }
+                do { try engine.start();self.playPCM() } catch { self.error="Audio route changed. End and restart the conversation." }
+            }
+        }
         let epoch = generation
+        let output=AVAudioPlayerNode();pcmPlayer=output;engine.attach(output);engine.connect(output,to:engine.mainMixerNode,format:pcmFormat)
+        output.installTap(onBus:0,bufferSize:1024,format:pcmFormat) { [weak self] buffer,_ in
+            guard let samples=buffer.floatChannelData?[0],buffer.frameLength>0 else { return }
+            let count=Int(buffer.frameLength)
+            let energy=(0..<count).reduce(0.0) { $0+Double(samples[$1]*samples[$1]) }
+            let amplitude=CGFloat(min(1,sqrt(energy/Double(count))*5))
+            Task { @MainActor in guard let self,self.active,self.generation == epoch else { return };self.playbackLevel=amplitude }
+        }
         let format=engine.inputNode.outputFormat(forBus:0)
         let target=AVAudioFormat(commonFormat:.pcmFormatInt16,sampleRate:16000,channels:1,interleaved:true)!
         guard let converter=AVAudioConverter(from:format,to:target) else { throw NSError(domain:"Audio",code:1) }
@@ -126,7 +150,7 @@ enum CredentialStore {
             converter.convert(to:output,error:&err) { _,status in if fed { status.pointee = .noDataNow; return nil }; fed=true; status.pointee = .haveData; return buffer }
             guard err == nil, let bytes=output.int16ChannelData?[0] else { return }; let data=Data(bytes:bytes,count:Int(output.frameLength)*2)
             let count=Int(output.frameLength); let rms=count > 0 ? sqrt((0..<count).reduce(0.0){$0+pow(Double(bytes[$1])/32768,2)}/Double(count)) : 0
-            Task { @MainActor in guard let self, self.active, self.generation == epoch, !self.muted else { return }; if self.state == .speaking { self.voiceFrames = rms > 0.025 ? self.voiceFrames+1 : 0; if self.voiceFrames >= 3 { self.player?.stop(); self.player=nil; self.stopMetering(); self.audioQueue=[]; self.turn=nil; self.state = .listening; self.send(["type":"interrupt"]); self.voiceFrames=0 } }; self.level = self.level * 0.3 + CGFloat(min(1,pow(rms*12,0.65))) * 0.7; self.send(["type":"audio","audio":data.base64EncodedString()]) }
+            Task { @MainActor in guard let self, self.active, self.generation == epoch, !self.muted else { return }; if self.state == .speaking { self.voiceFrames = rms > 0.025 ? self.voiceFrames+1 : 0; if self.voiceFrames >= 3 { self.stopPlayback(); self.turn=nil; self.state = .listening; self.send(["type":"interrupt"]); self.voiceFrames=0 } }; self.level = self.level * 0.3 + CGFloat(min(1,pow(rms*12,0.65))) * 0.7; self.send(["type":"audio","audio":data.base64EncodedString()]) }
         }; try engine.start()
     }
     func send(_ value:[String:String]) { guard let socket,let data=try? JSONSerialization.data(withJSONObject:value),let str=String(data:data,encoding:.utf8) else { return }; guard pendingSends < 8 || value["type"] != "audio" else { return }; pendingSends += 1; let epoch = generation; socket.send(.string(str)) { [weak self] _ in Task { @MainActor in guard let self, self.generation == epoch else { return }; self.pendingSends = max(0,self.pendingSends-1) } } }
@@ -137,7 +161,39 @@ enum CredentialStore {
         #if DEBUG
         showcaseActive=false
         #endif
-        generation=UUID(); pendingSends=0; turn=nil; receiveTask?.cancel(); receiveTask=nil; socket?.cancel(with:.normalClosure,reason:nil); socket=nil; engine?.stop(); engine?.inputNode.removeTap(onBus:0); engine=nil; player?.stop(); player=nil; stopMetering(); audioQueue=[]; voiceFrames=0; level=0; muted=false; state = .ready; recognitionReady=false;attentionCallID=nil;if !systemManagedAudio { try? AVAudioSession.sharedInstance().setActive(false,options:.notifyOthersOnDeactivation) };onEnded?();systemManagedAudio=false;audioActivated=true }
+        generation=UUID(); pendingSends=0; turn=nil; receiveTask?.cancel(); receiveTask=nil; socket?.cancel(with:.normalClosure,reason:nil); socket=nil; if let engineObserver { NotificationCenter.default.removeObserver(engineObserver);self.engineObserver=nil };stopPlayback();pcmPlayer=nil; engine?.stop(); engine?.inputNode.removeTap(onBus:0); engine=nil; player?.stop(); player=nil; stopMetering(); audioQueue=[]; voiceFrames=0; level=0; muted=false; state = .ready; recognitionReady=false;attentionCallID=nil;if !systemManagedAudio { try? AVAudioSession.sharedInstance().setActive(false,options:.notifyOthersOnDeactivation) };onEnded?();systemManagedAudio=false;audioActivated=true }
+    func stopPlayback() {
+        playbackGeneration=UUID();pcmPending=0;pcmQueue=[];pcmRemainder=Data();pcmPlayer?.stop()
+        player?.stop();player=nil;audioQueue=[];stopMetering()
+    }
+    func playPCM() {
+        guard active,let node=pcmPlayer,let engine,(!systemManagedAudio || audioActivated) else { return }
+        if !engine.isRunning {
+            do { try engine.start() } catch { self.error="Audio playback could not start. Check the selected audio route.";return }
+        }
+        let epoch=playbackGeneration
+        for data in pcmQueue {
+            let frames=data.count/2
+            guard let buffer=AVAudioPCMBuffer(pcmFormat:pcmFormat,frameCapacity:AVAudioFrameCount(frames)),let output=buffer.floatChannelData?[0] else { continue }
+            buffer.frameLength=AVAudioFrameCount(frames)
+            data.withUnsafeBytes { raw in
+                for index in 0..<frames {
+                    let sample=Float(Int16(littleEndian:raw.loadUnaligned(fromByteOffset:index*2,as:Int16.self)))/32768
+                    output[index]=sample
+                }
+            }
+            pcmPending += 1
+            node.scheduleBuffer(buffer,completionCallbackType:.dataPlayedBack) { [weak self] _ in
+                Task { @MainActor in
+                    guard let self,self.playbackGeneration == epoch,self.active else { return }
+                    self.pcmPending=max(0,self.pcmPending-1)
+                    if self.pcmPending == 0 { self.playbackLevel=0;self.state = .listening }
+                }
+            }
+        }
+        pcmQueue=[]
+        if pcmPending > 0 { node.play();state = .speaking }
+    }
     func playNext() throws { guard player == nil, !audioQueue.isEmpty, active else { return }; player = try AVAudioPlayer(data:audioQueue.removeFirst()); player?.delegate=self; player?.isMeteringEnabled=true; player?.play(); state = .speaking; startMetering() }
     func startMetering() {
         meterTimer?.invalidate()

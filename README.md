@@ -89,7 +89,7 @@ The plugin takes its session identity from Hermes' request context; the model ca
 
 Backend tests cover producer authentication, queue submission, deduplication, driving/opt-in gates, cooldown, confirmed decision return, acknowledgment, uncertain-delivery protection and speech payload handling. Swift unit tests cover private URL validation and stale audio after ending a session. A physical incoming-call test rang with working audio; vehicle audio, interruptions and the return-to-call flow need further hardware verification.
 
-Speech is delivered as complete MP3 sentences. Consultation with other agents is a separate Hermes profile extension, not included here. Accepted-action recovery after a disconnect is not implemented; do not replay requests automatically. The current transcript stays in app memory; the host persists attention events, confirmed decisions, delivery acknowledgments and request metadata. ElevenLabs processes speech and Hermes processes conversation.
+Manual conversations stay in the Hermes interface; only incoming attention calls use CallKit. Updated clients request streamed 24 kHz PCM audio and feed incremental text into one Eleven v4 Turbo dialogue context per reply. Older clients retain complete MP3 sentence playback. Chris is the default conversational voice; private host configuration can override it. Consultation with other agents is a separate Hermes profile extension, not included here. Accepted-action recovery after a disconnect is not implemented; do not replay requests automatically. The current transcript stays in app memory; the host persists attention events, confirmed decisions, delivery acknowledgments and request metadata. ElevenLabs processes speech and Hermes processes conversation.
 
 ## Project documentation
 
