@@ -51,6 +51,7 @@ struct HomeView: View {
         .onChange(of:scenePhase) { _,phase in
             if phase == .active && engaged { revealOngoingCall() }
         }
+        .onReceive(NotificationCenter.default.publisher(for:.hermesRevealSession)) { _ in revealOngoingCall() }
         .sheet(isPresented:$settings) { SettingsView() }
         .sheet(isPresented:$transcript) { TranscriptView().environmentObject(session) }
     }

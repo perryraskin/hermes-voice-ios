@@ -5,7 +5,7 @@ import Security
 @main struct HermesApp: App {
     @UIApplicationDelegateAdaptor(HermesAppDelegate.self) private var appDelegate
     @StateObject private var session = SharedRuntime.session
-    var body: some Scene { WindowGroup { HomeView().environmentObject(session).onOpenURL { url in Task { await session.pair(url) } }.preferredColorScheme(.dark) } }
+    var body: some Scene { WindowGroup { HomeView().environmentObject(session).onOpenURL { url in Task { if url.scheme=="hermesvoice" && url.host=="conversation" { NotificationCenter.default.post(name:.hermesRevealSession,object:nil) } else { await session.pair(url) } } }.preferredColorScheme(.dark) } }
 }
 
 enum VoiceState: String, CaseIterable { case ready = "Ready", connecting = "Connecting", listening = "Listening", thinking = "Thinking", speaking = "Speaking", paused = "Paused", failed = "Unavailable"
@@ -21,6 +21,8 @@ enum CredentialStore {
 }
 
 @MainActor final class VoiceSession: NSObject, ObservableObject, AVAudioPlayerDelegate {
+    var activityIdentifier=UUID()
+    var activityStartedAt=Date()
     @Published var state: VoiceState = .ready
     @Published var muted = false
     @Published var connected = false
@@ -69,7 +71,7 @@ enum CredentialStore {
     }
     var label: String { muted && active ? "Muted" : state.rawValue }
     var hint: String { muted && active ? "Your microphone is paused." : state.hint }
-    override init() { super.init(); observer = NotificationCenter.default.addObserver(forName:AVAudioSession.interruptionNotification, object:nil, queue:.main) { [weak self] _ in Task { @MainActor in if self?.systemManagedAudio != true { self?.pause() } } } }
+    override init() { super.init(); observer = NotificationCenter.default.addObserver(forName:AVAudioSession.interruptionNotification, object:nil, queue:.main) { [weak self] notification in Task { @MainActor in if self?.systemManagedAudio != true, self?.fishTransport == nil, let raw=notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt, AVAudioSession.InterruptionType(rawValue:raw) == .began { self?.pause() } } } }
     #if DEBUG
     func showConversationFixture() {
         // Synthetic README data in the actual views; no socket, recording or providers.
@@ -98,7 +100,7 @@ enum CredentialStore {
     func testConnection() async { do { var r = URLRequest(url:try baseURL().appendingPathComponent("v1/capabilities")); r.setValue("Bearer \(token)",forHTTPHeaderField:"Authorization"); r.timeoutInterval = 10; let (data,response) = try await PrivateHTTP.data(for:r); guard (response as? HTTPURLResponse)?.statusCode == 200, let cap = try JSONSerialization.jsonObject(with:data) as? [String:Any], cap["profile"] as? String == "voice", cap["ready"] as? Bool == true else { throw NSError(domain:"Hermes",code:2,userInfo:[NSLocalizedDescriptionKey:"The voice service is not ready or this device is not authorized."])}; fishAvailable=cap["fish_available"] as? Bool ?? false; connected = true; error = "" } catch { connected = false; self.error = error.localizedDescription } }
     func start() async {
         guard !active, !starting else { return }; starting=true; defer { starting=false }; let attempt=generation; save(); guard error.isEmpty else { return }
-        state = .connecting; await testConnection(); guard generation == attempt else { return }; guard connected else { state = .failed; return }
+        activityIdentifier=UUID();activityStartedAt=Date();state = .connecting; await testConnection(); guard generation == attempt else { return }; guard connected else { state = .failed; return }
         guard await AVAudioApplication.requestRecordPermission() else { error = "Allow microphone access in iPhone Settings."; state = .failed; return }
         guard generation == attempt else { return }
         if fishAvailable && UserDefaults.standard.string(forKey:"voiceProvider") != "elevenlabs" {

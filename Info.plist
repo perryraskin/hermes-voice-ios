@@ -37,6 +37,8 @@
 	<string>Hermes connects privately to your Mac over Tailscale for voice conversations and call settings.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Hermes uses your microphone during conversations you start.</string>
+	<key>NSSupportsLiveActivities</key>
+	<true/>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

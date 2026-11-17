@@ -8,6 +8,7 @@ import Combine
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("--showcase-conversation") { session.showConversationFixture() }
         #endif
+        VoiceLiveActivity.shared.observe(session)
         return session
     }()
 }

@@ -15,6 +15,7 @@ settings:
   base:
     GENERATE_INFOPLIST_FILE: YES
     SWIFT_VERSION: '5.0'
+    CURRENT_PROJECT_VERSION: '1'
     DEVELOPMENT_TEAM: "$(HERMES_DEVELOPMENT_TEAM)"
 packages:
   LiveKit:
@@ -24,13 +25,15 @@ targets:
   HermesVoice:
     type: application
     platform: iOS
-    sources: [Sources]
+    sources: [Sources, Shared]
     dependencies:
       - package: LiveKit
+      - target: HermesVoiceLiveActivity
     info:
       path: Info.plist
       properties:
         CFBundleDisplayName: Hermes
+        NSSupportsLiveActivities: true
         HermesPrivateHost: $(HERMES_PRIVATE_HOST)
         CFBundleURLTypes:
           - CFBundleURLName: com.perryraskin.hermes.voice.pair
@@ -48,6 +51,7 @@ targets:
                 UISceneDelegateClassName: $(PRODUCT_MODULE_NAME).CarPlayScene
     settings:
       base:
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) HERMES_APP"
         CODE_SIGN_ENTITLEMENTS: CarPlay.entitlements
         PRODUCT_BUNDLE_IDENTIFIER: com.perryraskin.hermes.voice
         GENERATE_INFOPLIST_FILE: YES
@@ -63,6 +67,24 @@ targets:
       configs:
         PhonePreview:
           CODE_SIGN_ENTITLEMENTS: Phone.entitlements
+  HermesVoiceLiveActivity:
+    type: app-extension
+    platform: iOS
+    sources: [WidgetExtension, Shared]
+    info:
+      path: WidgetExtension/Info.plist
+      properties:
+        CFBundleDisplayName: Hermes
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.perryraskin.hermes.voice.liveactivity
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) HERMES_WIDGET"
+        APPLICATION_EXTENSION_API_ONLY: YES
+        SKIP_INSTALL: YES
+        MARKETING_VERSION: 1.0
+        TARGETED_DEVICE_FAMILY: '1'
   HermesVoiceTests:
     type: bundle.unit-test
     platform: iOS
