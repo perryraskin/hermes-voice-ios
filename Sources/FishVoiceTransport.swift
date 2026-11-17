@@ -1,5 +1,6 @@
 import Foundation
 import LiveKit
+import AVFoundation
 
 struct FishSessionToken:Decodable {
     let session_id:String
@@ -17,10 +18,21 @@ struct FishSessionToken:Decodable {
     private var closed=false
     private var meter:Timer?
     private var muteChanging=false
-    init(session:VoiceSession,host:URL,credential:String) { self.session=session;self.host=host;self.credential=credential;super.init() }
+    private var connectionReady=false
+    private var microphoneStarting=false
+    private let audioOwner=UUID()
+    private static var currentAudioOwner:UUID?
+    private let systemManaged:Bool
+    init(session:VoiceSession,host:URL,credential:String) { self.session=session;self.host=host;self.credential=credential;self.systemManaged=session.systemManagedAudio;super.init() }
 
     func start() async throws {
+        Self.currentAudioOwner=audioOwner
+        try Self.configureAudio(systemManaged:systemManaged,active:session?.audioActivated == true)
         var request=URLRequest(url:host.appendingPathComponent("v1/fish/sessions"));request.httpMethod="POST";request.timeoutInterval=25;request.setValue("Bearer \(credential)",forHTTPHeaderField:"Authorization")
+        if let call=session?.attentionCallID {
+            request.setValue("application/json",forHTTPHeaderField:"Content-Type")
+            request.httpBody=try JSONSerialization.data(withJSONObject:["call_id":call])
+        }
         let (data,response)=try await PrivateHTTP.data(for:request)
         guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw NSError(domain:"Fish",code:1,userInfo:[NSLocalizedDescriptionKey:"Fish could not start. Check the trial configuration or credit."]) }
         let token=try JSONDecoder().decode(FishSessionToken.self,from:data);self.token=token
@@ -35,8 +47,9 @@ struct FishSessionToken:Decodable {
         }
         try await room.connect(url:token.livekit_url,token:token.token)
         guard !closed else { await room.disconnect();return }
-        try await room.localParticipant.setMicrophone(enabled:true)
-        session?.state = .listening
+        connectionReady=true
+        if systemManaged { session?.onReady?() }
+        if !systemManaged || session?.audioActivated == true { try activateAudio() }
         meter=Timer.scheduledTimer(withTimeInterval:1.0/20,repeats:true) { [weak self] _ in
             Task { @MainActor in
                 guard let self,!self.closed else { return }
@@ -45,6 +58,31 @@ struct FishSessionToken:Decodable {
             }
         }
         for participant in room.remoteParticipants.values { updateState(participant.attributes["lk.agent.state"]) }
+    }
+    static func configureAudio(systemManaged:Bool,active:Bool) throws {
+        AudioManager.shared.audioSession.isAutomaticConfigurationEnabled = !systemManaged
+        if systemManaged && active {
+            try AVAudioSession.sharedInstance().setCategory(.playAndRecord,mode:.voiceChat,options:[.allowBluetoothHFP])
+        }
+        try AudioManager.shared.setEngineAvailability(!systemManaged || active ? .default:.none)
+    }
+    func activateAudio() throws {
+        guard !closed else { return }
+        try Self.configureAudio(systemManaged:systemManaged,active:true)
+        guard connectionReady,!microphoneStarting else { return };microphoneStarting=true
+        Task {
+            defer { microphoneStarting=false }
+            do {
+                try await room.localParticipant.setMicrophone(enabled:session?.muted != true)
+                guard !closed else { return };session?.state = .listening
+            } catch {
+                guard !closed else { return };session?.end();session?.error="The call microphone could not start. Check the audio route."
+            }
+        }
+    }
+    func deactivateAudio() {
+        guard systemManaged,!closed else { return }
+        try? Self.configureAudio(systemManaged:true,active:false)
     }
     private func transcript(id:String,identity:Participant.Identity,text:String) {
         guard !closed else { return }
@@ -59,12 +97,18 @@ struct FishSessionToken:Decodable {
         default:break
         }
     }
-    func setMuted(_ value:Bool) {
-        guard !closed,!muteChanging else { return };muteChanging=true
+    func setMuted(_ value:Bool,completion:((Bool)->Void)?=nil) {
+        guard !closed,!muteChanging else { completion?(false);return }
+        if systemManaged && session?.audioActivated != true {
+            // CallKit has gated the engine off. Save the desired mute state;
+            // activation applies it before capture starts, avoiding a hold cycle.
+            session?.muted=value;session?.level=0;completion?(true);return
+        }
+        muteChanging=true
         Task {
             defer { muteChanging=false }
-            do { try await room.localParticipant.setMicrophone(enabled:!value);guard !closed else { return };session?.muted=value;session?.level=0 }
-            catch { guard !closed else { return };session?.error="The microphone could not be changed." }
+            do { try await room.localParticipant.setMicrophone(enabled:!value);guard !closed else { return };session?.muted=value;session?.level=0;completion?(true) }
+            catch { guard !closed else { return };session?.error="The microphone could not be changed.";completion?(false) }
         }
     }
     private func closeRemote(_ token:FishSessionToken) async {
@@ -77,6 +121,11 @@ struct FishSessionToken:Decodable {
         Task {
             try? await room.localParticipant.publish(data:Data("{\"type\":\"user.hangup\"}".utf8),options:DataPublishOptions(topic:"client-event",reliable:true))
             await room.disconnect()
+            if Self.currentAudioOwner==audioOwner {
+                Self.currentAudioOwner=nil
+                if systemManaged { try? AudioManager.shared.setEngineAvailability(.none) }
+                AudioManager.shared.audioSession.isAutomaticConfigurationEnabled=true
+            }
             if let token { await closeRemote(token) }
         }
     }

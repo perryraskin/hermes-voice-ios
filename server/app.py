@@ -14,6 +14,10 @@ async def auth(request, handler):
     if request.path == '/health':return await handler(request)
     if request.path == '/v1/pair' or request.path.startswith('/pair/'):
         return await handler(request)
+    if request.path == '/v1/fish/observation':
+        expected=request.app['config'].get('FISH_CALLBACK_KEY','')
+        if not expected or not hmac.compare_digest(request.headers.get('Authorization',''),'Bearer '+expected):raise web.HTTPUnauthorized()
+        return await handler(request)
     if request.path == '/v1/voice/decision':
         expected=request.app['config'].get('VOICE_TOOL_TOKEN','')
         if not expected or not hmac.compare_digest(request.headers.get('Authorization',''),'Bearer '+expected):

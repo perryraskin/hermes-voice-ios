@@ -12,6 +12,7 @@ import AVFoundation
     private var incomingID:String?
     private var answerAction:CXAnswerCallAction?
     private var startupTimer:Timer?
+    private var preHoldMuted=false
     override private init() {
         let config=CXProviderConfiguration();config.supportsVideo=false;config.maximumCallsPerCallGroup=1;config.supportedHandleTypes=[.generic];config.includesCallsInRecents=false
         provider=CXProvider(configuration:config);super.init();provider.setDelegate(self,queue:.main)
@@ -61,8 +62,11 @@ import AVFoundation
         SharedRuntime.session.end();action.fulfill()
         if let incoming { Task { try? await AttentionAPI.call(incoming,action:answered ? "ended":"declined") } }
     }
-    func provider(_ provider:CXProvider,perform action:CXSetMutedCallAction) { SharedRuntime.session.setMuted(action.isMuted);action.fulfill() }
-    func provider(_ provider:CXProvider,perform action:CXSetHeldCallAction) { SharedRuntime.session.setMuted(action.isOnHold);action.fulfill() }
+    func provider(_ provider:CXProvider,perform action:CXSetMutedCallAction) { SharedRuntime.session.setMuted(action.isMuted) { success in if success { action.fulfill() } else { action.fail() } } }
+    func provider(_ provider:CXProvider,perform action:CXSetHeldCallAction) {
+        if action.isOnHold { preHoldMuted=SharedRuntime.session.muted }
+        SharedRuntime.session.setMuted(action.isOnHold || preHoldMuted) { success in if success { action.fulfill() } else { action.fail() } }
+    }
     func provider(_ provider:CXProvider,didActivate audioSession:AVAudioSession) { SharedRuntime.session.audioActivated=true;do { try SharedRuntime.session.beginCaptureIfReady() } catch { SharedRuntime.session.error=error.localizedDescription;SharedRuntime.session.end() } }
     func provider(_ provider:CXProvider,didDeactivate audioSession:AVAudioSession) { SharedRuntime.session.suspendSystemAudio() }
     func providerDidReset(_ provider:CXProvider) { callID=nil;incomingID=nil;SharedRuntime.session.end() }
@@ -93,7 +97,7 @@ import AVFoundation
                 defer { completion() }
                 guard let self,error==nil else { return }
                 guard self.callID==nil,!SharedRuntime.session.active,let identifier else { self.provider.reportCall(with:id,endedAt:Date(),reason:.failed);return }
-                self.callID=id;self.incomingID=identifier
+                self.callID=id;self.incomingID=identifier;self.preHoldMuted=false
             }
         }
     }

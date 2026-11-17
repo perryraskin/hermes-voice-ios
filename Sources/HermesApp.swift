@@ -101,7 +101,7 @@ enum CredentialStore {
         state = .connecting; await testConnection(); guard generation == attempt else { return }; guard connected else { state = .failed; return }
         guard await AVAudioApplication.requestRecordPermission() else { error = "Allow microphone access in iPhone Settings."; state = .failed; return }
         guard generation == attempt else { return }
-        if fishAvailable && attentionCallID == nil && UserDefaults.standard.string(forKey:"voiceProvider") != "elevenlabs" {
+        if fishAvailable && UserDefaults.standard.string(forKey:"voiceProvider") != "elevenlabs" {
             let epoch=UUID();generation=epoch;entries=[];fishEntries=[:];muted=false
             do {
                 let transport=FishVoiceTransport(session:self,host:try baseURL(),credential:token);fishTransport=transport
@@ -129,11 +129,12 @@ enum CredentialStore {
     default: break
     } }
     func beginCaptureIfReady() throws {
+        if let fishTransport { try fishTransport.activateAudio();return }
         guard recognitionReady,(!systemManagedAudio || audioActivated) else { return }
         if let engine { try engine.start() } else { try capture() }
         if pcmPending == 0 { state = .listening };playPCM()
     }
-    func suspendSystemAudio() { audioActivated=false;engine?.stop();player?.pause();pcmPlayer?.pause() }
+    func suspendSystemAudio() { audioActivated=false;fishTransport?.deactivateAudio();engine?.stop();player?.pause();pcmPlayer?.pause() }
     func capture() throws {
         let audio = AVAudioSession.sharedInstance(); try audio.setCategory(.playAndRecord,mode:.voiceChat,options:[.defaultToSpeaker,.allowBluetoothHFP]); if !systemManagedAudio { try audio.setActive(true) }
         let engine=AVAudioEngine(); self.engine=engine; try engine.inputNode.setVoiceProcessingEnabled(true)
@@ -167,7 +168,7 @@ enum CredentialStore {
     }
     func send(_ value:[String:String]) { guard let socket,let data=try? JSONSerialization.data(withJSONObject:value),let str=String(data:data,encoding:.utf8) else { return }; guard pendingSends < 8 || value["type"] != "audio" else { return }; pendingSends += 1; let epoch = generation; socket.send(.string(str)) { [weak self] _ in Task { @MainActor in guard let self, self.generation == epoch else { return }; self.pendingSends = max(0,self.pendingSends-1) } } }
     func toggleMute() { SystemCalls.shared.setMuted(!muted) }
-    func setMuted(_ value:Bool) { if let fishTransport { fishTransport.setMuted(value);return };muted=value;level=0;send(["type":muted ? "mute":"unmute"]) }
+    func setMuted(_ value:Bool,completion:((Bool)->Void)?=nil) { if let fishTransport { fishTransport.setMuted(value,completion:completion);return };muted=value;level=0;send(["type":muted ? "mute":"unmute"]);completion?(true) }
     func pause() { guard active else { return }; end(); state = .paused }
     func end() {
         #if DEBUG
