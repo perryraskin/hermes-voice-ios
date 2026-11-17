@@ -17,6 +17,9 @@ struct FishSessionToken:Decodable {
     private var token:FishSessionToken?
     private var closed=false
     private var meter:Timer?
+    private var resultTask:Task<Void,Never>?
+    private var deliveredResults=Set<String>()
+    private var lastUserSpeech=Date.distantPast
     private var muteChanging=false
     private var connectionReady=false
     private var microphoneStarting=false
@@ -48,6 +51,7 @@ struct FishSessionToken:Decodable {
         try await room.connect(url:token.livekit_url,token:token.token)
         guard !closed else { await room.disconnect();return }
         connectionReady=true
+        watchResults(token)
         if systemManaged { session?.onReady?() }
         if !systemManaged || session?.audioActivated == true { try activateAudio() }
         meter=Timer.scheduledTimer(withTimeInterval:1.0/20,repeats:true) { [weak self] _ in
@@ -86,6 +90,7 @@ struct FishSessionToken:Decodable {
     }
     private func transcript(id:String,identity:Participant.Identity,text:String) {
         guard !closed else { return }
+        if identity==room.localParticipant.identity { lastUserSpeech=Date() }
         session?.receiveFishTranscript(id:id,role:identity==room.localParticipant.identity ? "You":"Hermes",text:text)
     }
     private func updateState(_ state:String?) {
@@ -111,12 +116,41 @@ struct FishSessionToken:Decodable {
             catch { guard !closed else { return };session?.error="The microphone could not be changed.";completion?(false) }
         }
     }
+    private struct DeferredResults:Decodable { let pending:Bool;let ready:[String] }
+    private func watchResults(_ token:FishSessionToken) {
+        resultTask=Task { [weak self] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(for:.seconds(2)) } catch { return }
+                guard let self,!self.closed else { return }
+                do {
+                    var request=URLRequest(url:self.host.appendingPathComponent("v1/fish/sessions/\(token.session_id)/results"))
+                    request.timeoutInterval=8;request.setValue("Bearer \(self.credential)",forHTTPHeaderField:"Authorization")
+                    let (data,response)=try await PrivateHTTP.data(for:request)
+                    let status=(response as? HTTPURLResponse)?.statusCode
+                    if status==404 || status==410 { return }
+                    guard status==200,!self.closed else { continue }
+                    let results=try JSONDecoder().decode(DeferredResults.self,from:data)
+                    if results.pending || !results.ready.isEmpty {
+                        try await self.room.localParticipant.publish(data:Data("{\"type\":\"user.activity\"}".utf8),options:DataPublishOptions(topic:"client-event",reliable:true))
+                    }
+                    guard self.session?.state == .listening,Date().timeIntervalSince(self.lastUserSpeech)>2 else { continue }
+                    if let marker=results.ready.first(where:{!self.deliveredResults.contains($0)}) {
+                        self.deliveredResults.insert(marker) // Never replay an uncertain send.
+                        let payload=try JSONSerialization.data(withJSONObject:["type":"user.message","text":marker,"audio":true])
+                        try await self.room.localParticipant.publish(data:payload,options:DataPublishOptions(topic:"client-event",reliable:true))
+                    }
+                } catch {
+                    guard !Task.isCancelled,!self.closed else { return }
+                }
+            }
+        }
+    }
     private func closeRemote(_ token:FishSessionToken) async {
         var request=URLRequest(url:host.appendingPathComponent("v1/fish/sessions/\(token.session_id)/end"));request.httpMethod="POST";request.timeoutInterval=10;request.setValue("Bearer \(credential)",forHTTPHeaderField:"Authorization")
         _ = try? await PrivateHTTP.data(for:request)
     }
     func end() {
-        guard !closed else { return };closed=true;meter?.invalidate();meter=nil
+        guard !closed else { return };closed=true;resultTask?.cancel();resultTask=nil;meter?.invalidate();meter=nil
         let token=self.token
         Task {
             try? await room.localParticipant.publish(data:Data("{\"type\":\"user.hangup\"}".utf8),options:DataPublishOptions(topic:"client-event",reliable:true))

@@ -22,3 +22,11 @@ Provider readiness means configuration is present, not a successful provider hea
 5. Test configuration absence, unknown providers, legacy compatibility, start/end, cancellation, reconnect ambiguity, audio interruption and incoming-call behavior. Validate physical iPhone/CarPlay routing separately.
 
 This is explicit provider integration, not a claim that arbitrary voice APIs can be plugged in without code. Extract a shared transport protocol when a third integration establishes which lifecycle operations are actually common.
+
+## Slow Fish turns
+
+Fish's custom-LLM endpoint has a ten-second request deadline. The host waits up to five seconds for a complete Hermes answer. Longer turns receive a short acknowledgement while the original execution continues once in the background. Provider retries reuse the persisted execution rather than repeating tools.
+
+During an active session, the updated app checks the private, device-authenticated `/v1/fish/sessions/{session}/results` route every two seconds. When the session is listening and recent user speech has stopped, it sends an opaque result marker through Fish's reliable `client-event` channel. The callback returns the stored answer for speech without starting another Hermes turn. Markers are scoped to the live session and cannot count as owner speech or decision confirmation. Polling stops when the session ends; this is not a scheduled agent task.
+
+Deploy the host and updated app together: older apps can hear the acknowledgement but cannot retrieve the deferred answer. Results are not a durable inbox after hangup. An interrupted or uncertain execution is reported without automatically repeating a potentially completed action. This avoids the provider timeout; it does not make a slow specialist consultation finish faster.

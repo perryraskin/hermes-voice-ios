@@ -3,7 +3,7 @@
 The existing device API and native Hermes API remain private. Callback identities
 are minted locally; provider retries attach to one persisted native execution.
 """
-import asyncio,hashlib,hmac,json,secrets,sqlite3,time,uuid
+import asyncio,hashlib,hmac,json,secrets,sqlite3,time,uuid,re
 from pathlib import Path
 from aiohttp import web,ClientSession,ClientTimeout
 
@@ -18,6 +18,10 @@ CREATE TABLE IF NOT EXISTS fish_runs (session TEXT, digest TEXT, status TEXT, re
         columns={r[1] for r in self.db.execute('PRAGMA table_info(fish_sessions)')}
         if 'call_id' not in columns:self.db.execute('ALTER TABLE fish_sessions ADD COLUMN call_id TEXT')
         self.db.execute('CREATE TABLE IF NOT EXISTS fish_heard(session TEXT,digest TEXT,PRIMARY KEY(session,digest))');self.db.commit()
+        self.db.execute('CREATE TABLE IF NOT EXISTS fish_deferred(session TEXT,digest TEXT,nonce TEXT UNIQUE,claimed INTEGER DEFAULT 0,PRIMARY KEY(session,digest))');self.db.commit()
+        run_columns={r[1] for r in self.db.execute('PRAGMA table_info(fish_runs)')}
+        if 'started' not in run_columns:self.db.execute('ALTER TABLE fish_runs ADD COLUMN started REAL DEFAULT 0')
+        self.db.commit()
         self.runs={};self.created=[];self.session_locks={}
 
     @property
@@ -32,6 +36,7 @@ CREATE TABLE IF NOT EXISTS fish_runs (session TEXT, digest TEXT, status TEXT, re
             if not context:raise web.HTTPGone(text='The incoming call is no longer available')
             if self.db.execute('SELECT 1 FROM fish_sessions WHERE call_id=? AND ended=0 AND expires>?',(call,time.time())).fetchone():raise web.HTTPConflict(text='This call already has a voice session')
         now=time.time()
+        self.db.execute('DELETE FROM fish_deferred WHERE session IN (SELECT id FROM fish_sessions WHERE expires<?)',(now-3600,))
         self.db.execute('DELETE FROM fish_runs WHERE session IN (SELECT id FROM fish_sessions WHERE expires<?)',(now-3600,))
         self.db.execute('DELETE FROM fish_sessions WHERE expires<?',(now-3600,));self.db.commit()
         self.created=[t for t in self.created if t>now-60]
@@ -87,6 +92,19 @@ CREATE TABLE IF NOT EXISTS fish_runs (session TEXT, digest TEXT, status TEXT, re
         if inserted:request.app['returns'].heard(row[0],text)
         return web.json_response({'context':{k:context[k] for k in ('source','title','body')}})
 
+    async def results(self,request):
+        # Device-authenticated, scoped to the active Fish session. Results stay
+        # on the host; the client receives only unguessable retrieval markers.
+        row=self.db.execute('SELECT id,expires,ended FROM fish_sessions WHERE fish_id=?',(request.match_info['session'],)).fetchone()
+        if not row or row[1]<time.time() or row[2]:raise web.HTTPGone()
+        self.db.execute("UPDATE fish_runs SET status='failed',response='That request was interrupted. Please check its outcome before repeating an action.' WHERE session=? AND status='pending' AND started<?",(row[0],time.time()-120));self.db.commit()
+        rows=self.db.execute("SELECT d.nonce,r.status FROM fish_deferred d JOIN fish_runs r ON r.session=d.session AND r.digest=d.digest WHERE d.session=? AND d.claimed=0",(row[0],)).fetchall()
+        return web.json_response({'pending':any(r[1]=='pending' for r in rows),'ready':['[Hermes result '+r[0]+']' for r in rows if r[1] in ('done','failed')]},headers={'Cache-Control':'no-store'})
+
+    async def speak(self,request,text):
+        event={'object':'chat.completion.chunk','choices':[{'index':0,'delta':{'content':text},'finish_reason':None}]}
+        return web.Response(text='data: '+json.dumps(event)+'\n\ndata: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',content_type='text/event-stream',headers={'Cache-Control':'no-store'})
+
     async def callback(self,request):
         expected=self.config.get('FISH_CALLBACK_KEY','')
         if not expected or not hmac.compare_digest(request.headers.get('Authorization',''),'Bearer '+expected):raise web.HTTPUnauthorized()
@@ -102,6 +120,17 @@ CREATE TABLE IF NOT EXISTS fish_runs (session TEXT, digest TEXT, status TEXT, re
         if not history or history[-1]['role']!='user' or not isinstance(history[-1]['content'],str):raise web.HTTPBadRequest()
         text=history[-1]['content'].strip()
         if not text or len(text)>12000:raise web.HTTPBadRequest()
+        if text.startswith('[Hermes result '):
+            match=re.fullmatch(r'\[Hermes result ([A-Za-z0-9_-]{32})\]',text)
+            if not match:raise web.HTTPBadRequest()
+            result=self.db.execute("SELECT r.response,r.status,d.digest FROM fish_deferred d JOIN fish_runs r ON r.session=d.session AND r.digest=d.digest WHERE d.session=? AND d.nonce=?",(sid,match[1])).fetchone()
+            if not result or result[1] not in ('done','failed'):raise web.HTTPForbidden()
+            # This synthetic retrieval is never an owner utterance or a new
+            # Hermes turn, and can never satisfy decision confirmation.
+            self.db.execute('UPDATE fish_deferred SET claimed=1 WHERE session=? AND nonce=?',(sid,match[1]));self.db.commit()
+            return await self.speak(request,result[0])
+        # Retrieval markers are transport controls, not conversation history.
+        history=[m for m in history if not (m['role']=='user' and isinstance(m['content'],str) and m['content'].startswith('[Hermes result '))]
         digest=hashlib.sha256(json.dumps(history,sort_keys=True).encode()).hexdigest();key=(sid,digest)
         cached=self.db.execute('SELECT status,response FROM fish_runs WHERE session=? AND digest=?',key).fetchone()
         if key not in self.runs:
@@ -110,26 +139,30 @@ CREATE TABLE IF NOT EXISTS fish_runs (session TEXT, digest TEXT, status TEXT, re
                 answer=cached[1] if cached[0]=='done' else 'That request was interrupted. Please check its outcome before repeating an action.'
                 self.runs[key]={'chunks':[answer],'done':True,'changed':asyncio.Condition()}
             else:
-                self.db.execute('INSERT INTO fish_runs VALUES(?,?,?,?)',(sid,digest,'pending',''));self.db.commit()
+                self.db.execute('INSERT INTO fish_runs(session,digest,status,response,started) VALUES(?,?,?,?,?)',(sid,digest,'pending','',time.time()));self.db.commit()
                 self.runs[key]={'chunks':[],'done':False,'changed':asyncio.Condition()}
                 self.runs[key]['task']=asyncio.create_task(self.generate(key,row[0],text))
         run=self.runs[key]
-        response=web.StreamResponse(headers={'Content-Type':'text/event-stream','Cache-Control':'no-store'});await response.prepare(request)
-        index=0
-        while True:
-            async with run['changed']:
-                await run['changed'].wait_for(lambda:index<len(run['chunks']) or run['done'])
-                chunks=run['chunks'][index:];index=len(run['chunks']);done=run['done']
-            for text in chunks:
-                event={'id':'hermes-'+digest[:16],'object':'chat.completion.chunk','choices':[{'index':0,'delta':{'content':text},'finish_reason':None}]}
-                try:await response.write(('data: '+json.dumps(event)+'\n\n').encode())
-                except (ConnectionResetError,asyncio.CancelledError):return response
-            if done:break
-        await response.write(b'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n')
-        return response
+        deferred=self.db.execute('SELECT nonce FROM fish_deferred WHERE session=? AND digest=?',key).fetchone()
+        if not deferred and not run['done']:
+            try:
+                async with run['changed']:
+                    await asyncio.wait_for(run['changed'].wait_for(lambda:run['done']),timeout=float(self.config.get('FISH_INLINE_SECONDS',5)))
+            except asyncio.TimeoutError:pass
+        if deferred or not run['done']:
+            self.db.execute('INSERT OR IGNORE INTO fish_deferred(session,digest,nonce) VALUES(?,?,?)',(*key,secrets.token_urlsafe(24)));self.db.commit()
+            return await self.speak(request,"I’m still working on that. I’ll bring you the answer when it’s ready.")
+        return await self.speak(request,''.join(run['chunks']))
 
     async def generate(self,key,native,text):
         async with self.session_locks.setdefault(native,asyncio.Lock()):
+            row=self.db.execute('SELECT expires,ended FROM fish_sessions WHERE id=?',(key[0],)).fetchone()
+            if not row or row[0]<time.time() or row[1]:
+                run=self.runs[key]
+                async with run['changed']:
+                    run['chunks']=['That conversation ended before the request could start.'];run['done']=True;run['changed'].notify_all()
+                self.db.execute('UPDATE fish_runs SET status=?,response=? WHERE session=? AND digest=?',('failed',run['chunks'][0],*key));self.db.commit()
+                return
             await self.generate_once(key,native,text)
 
     async def generate_once(self,key,native,text):
@@ -160,7 +193,9 @@ CREATE TABLE IF NOT EXISTS fish_runs (session TEXT, digest TEXT, status TEXT, re
             self.db.execute('UPDATE fish_runs SET status=?,response=? WHERE session=? AND digest=?',('done',answer,*key));self.db.commit()
         except Exception:
             # Persist uncertainty rather than retrying a potentially executed tool.
-            if not run['chunks']:await add('That request was interrupted. Please check its outcome before repeating an action.')
+            answer='That request was interrupted. Please check its outcome before repeating an action.'
+            run['chunks']=[];await add(answer)
+            self.db.execute('UPDATE fish_runs SET status=?,response=? WHERE session=? AND digest=?',('failed',answer,*key));self.db.commit()
         finally:
             async with run['changed']:run['done']=True;run['changed'].notify_all()
 
@@ -174,6 +209,7 @@ def install(app,config):
     app.router.add_post('/v1/fish/sessions',trial.create_session)
     app.router.add_post('/v1/fish/observation',trial.observation)
     app.router.add_post('/v1/fish/sessions/{session}/end',trial.end_session)
+    app.router.add_get('/v1/fish/sessions/{session}/results',trial.results)
     return trial
 
 if __name__=='__main__':

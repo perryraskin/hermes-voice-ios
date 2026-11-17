@@ -35,8 +35,22 @@ class FishCallbackTests(AioHTTPTestCase):
     async def test_uncertain_run_after_restart_is_not_replayed(self):
         import hashlib
         digest=hashlib.sha256(json.dumps([{'role':'user','content':'Hello'}],sort_keys=True).encode()).hexdigest()
-        self.bridge.db.execute('INSERT INTO fish_runs VALUES(?,?,?,?)',('registered',digest,'pending',''));self.bridge.db.commit()
+        self.bridge.db.execute('INSERT INTO fish_runs(session,digest,status,response) VALUES(?,?,?,?)',('registered',digest,'pending',''));self.bridge.db.commit()
         response=await self.send();self.assertIn('interrupted',await response.text());self.assertEqual(self.executions,0)
+    async def test_slow_work_returns_ack_then_result_without_new_execution(self):
+        self.bridge.config['FISH_INLINE_SECONDS']=.005
+        first=await self.send();self.assertIn('still working',await first.text())
+        nonce=self.bridge.db.execute('SELECT nonce FROM fish_deferred').fetchone()[0]
+        await asyncio.sleep(.06)
+        retry=await self.send();self.assertIn('still working',await retry.text())
+        body=self.body();body['messages'].append({'role':'user','content':'[Hermes result '+nonce+']'})
+        result=await self.send(body);self.assertIn('Hello from Hermes',await result.text())
+        self.assertEqual(self.executions,1)
+        self.assertEqual(self.bridge.db.execute('SELECT claimed FROM fish_deferred').fetchone()[0],1)
+        body['messages'][-1]['content']='[Hermes result '+'x'*32+']'
+        self.assertEqual((await self.send(body)).status,403)
+        self.assertEqual(self.executions,1)
+
     async def test_public_surface_has_no_device_or_hermes_routes(self):
         for path in ['/health','/v1/fish/sessions','/v1/events','/v1/stream','/chat/completions']:
             self.assertEqual((await self.client.get(path)).status,404)
@@ -91,6 +105,19 @@ class IncomingFishTests(AioHTTPTestCase):
         delivery=Delivery();self.app['returns'].delivery=delivery
         r,d=await self.decision('confirm');self.assertEqual(d['status'],'delivered')
         await self.decision('confirm');self.assertEqual(len(delivery.sent),1);self.assertEqual(delivery.sent[0][0],self.thread)
+    async def test_deferred_results_require_device_auth_and_live_session(self):
+        await self.make_call()
+        db=self.app['fish_trial'].db
+        db.execute("INSERT INTO fish_runs(session,digest,status,response,started) VALUES(?,?,?,?,?)",(self.sid,'d','done','Completed answer',time.time()))
+        db.execute("INSERT INTO fish_deferred(session,digest,nonce) VALUES(?,?,?)",(self.sid,'d','n'*32));db.commit()
+        path='/v1/fish/sessions/fish-incoming/results'
+        self.assertEqual((await self.client.get(path)).status,401)
+        self.assertEqual((await self.client.get(path,headers={'Authorization':'Bearer callback-test'})).status,401)
+        r=await self.client.get(path,headers={'Authorization':'Bearer owner-test'})
+        self.assertEqual((await r.json())['ready'],['[Hermes result '+'n'*32+']'])
+        db.execute('UPDATE fish_sessions SET ended=1');db.commit()
+        self.assertEqual((await self.client.get(path,headers={'Authorization':'Bearer owner-test'})).status,410)
+
     async def test_owner_cannot_forge_observations_and_stale_calls_are_rejected(self):
         await self.make_call()
         r=await self.client.post('/v1/fish/observation',headers={'Authorization':'Bearer owner-test'},json={'session':self.sid,'text':'yes','digest':'a'*64})
