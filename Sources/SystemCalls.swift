@@ -31,6 +31,27 @@ import AVFoundation
         guard callID == nil else { return }
         Task { await SharedRuntime.session.start() }
     }
+    // Background start from the Action button, Control Center or Siri. The
+    // intent stays alive until audio is flowing, so iOS keeps the session.
+    func toggleFromIntent() async throws {
+        let session=SharedRuntime.session
+        if callID != nil || session.active || session.state == .connecting { end();return }
+        VoiceLiveActivity.shared.allowBackgroundStart()
+        defer { VoiceLiveActivity.shared.endBackgroundStart() }
+        session.save()
+        guard session.error.isEmpty else { throw HermesStartError(message:session.error) }
+        session.prepareActivity()
+        try VoiceLiveActivity.shared.requestForIntent(session)
+        await session.start()
+        let deadline=Date().addingTimeInterval(12)
+        while session.active,session.state == .connecting || session.state == .ready,Date() < deadline {
+            try? await Task.sleep(for:.milliseconds(100))
+        }
+        await VoiceLiveActivity.shared.settled()
+        guard session.active else {
+            throw HermesStartError(message:session.error.isEmpty ? "Hermes could not start. Open Hermes to check your connection." : session.error)
+        }
+    }
     func end() {
         guard let id=callID else { SharedRuntime.session.end();return }
         controller.request(CXTransaction(action:CXEndCallAction(call:id))) { [weak self] error in

@@ -7,6 +7,7 @@ struct VoiceActivityAttributes:ActivityAttributes {
         var phase:String
         var muted:Bool
         var title:String { muted ? "Muted":phase }
+        var animatesWave:Bool { !muted && (phase == "Listening" || phase == "Speaking") }
         var symbol:String {
             if muted { return "mic.slash.fill" }
             switch phase {

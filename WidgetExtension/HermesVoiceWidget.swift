@@ -6,7 +6,19 @@ private let sage=Color(red:0.77,green:0.89,blue:0.71)
 private let surface=Color(red:0.055,green:0.075,blue:0.062)
 
 @main struct HermesVoiceWidgets:WidgetBundle {
-    var body:some Widget { HermesVoiceActivityWidget() }
+    var body:some Widget { HermesVoiceActivityWidget();HermesTalkControl() }
+}
+/// Assignable to the Action button, Control Center and the Lock Screen.
+struct HermesTalkControl:ControlWidget {
+    var body:some ControlWidgetConfiguration {
+        StaticControlConfiguration(kind:"com.perryraskin.hermes.voice.talk") {
+            ControlWidgetButton(action:StartHermesConversationIntent()) {
+                Label("Talk to Hermes",systemImage:"waveform")
+            }
+        }
+        .displayName("Talk to Hermes")
+        .description("Start a voice conversation without opening Hermes. Press again to end it.")
+    }
 }
 struct HermesVoiceActivityWidget:Widget {
     var body:some WidgetConfiguration {
@@ -47,10 +59,12 @@ struct HermesVoiceActivityWidget:Widget {
                 }
             } compactLeading: {
                 Image(systemName:"waveform").foregroundStyle(sage)
+                    .symbolEffect(.variableColor.iterative.dimInactiveLayers,options:.repeating,isActive:context.state.animatesWave)
             } compactTrailing: {
                 Image(systemName:context.state.symbol).foregroundStyle(context.state.muted ? .orange:sage)
             } minimal: {
                 Image(systemName:context.state.muted ? "mic.slash.fill":"waveform").foregroundStyle(sage)
+                    .symbolEffect(.variableColor.iterative.dimInactiveLayers,options:.repeating,isActive:context.state.animatesWave)
             }
             .widgetURL(URL(string:"hermesvoice://conversation"))
             .keylineTint(sage)

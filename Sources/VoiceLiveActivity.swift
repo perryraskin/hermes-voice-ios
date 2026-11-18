@@ -11,6 +11,20 @@ import UIKit
     private var lastState:VoiceActivityAttributes.ContentState?
     private var dismissedSession:String?
     private var work:Task<Void,Never>?
+    private var backgroundStart=false
+
+    /// Only the Talk to Hermes intent may request an activity from the background.
+    func allowBackgroundStart() { backgroundStart=true }
+    func endBackgroundStart() { backgroundStart=false }
+    func settled() async { await work?.value }
+    /// AudioRecordingIntent only grants a background request inside perform(),
+    /// before audio starts, so request it directly instead of through `work`.
+    func requestForIntent(_ session:VoiceSession) throws {
+        guard ActivityAuthorizationInfo().areActivitiesEnabled else { throw HermesStartError(message:"Turn on Live Activities for Hermes in Settings to start from the Action button.") }
+        let content=VoiceActivityAttributes.ContentState(phase:VoiceState.connecting.rawValue,muted:false)
+        current=try Activity.request(attributes:VoiceActivityAttributes(sessionID:session.activityIdentifier.uuidString,startedAt:session.activityStartedAt,isCall:false),content:ActivityContent(state:content,staleDate:nil),pushType:nil)
+        lastState=content;dismissedSession=nil
+    }
 
     func observe(_ session:VoiceSession) {
         self.session=session
@@ -32,6 +46,7 @@ import UIKit
         let content=VoiceActivityAttributes.ContentState(phase:state.rawValue,muted:muted)
         let startedAt=session.activityStartedAt
         let isCall=session.systemManagedAudio
+        let fromIntent=backgroundStart
         let previous=work
         work=Task { [weak self] in
             await previous?.value
@@ -51,7 +66,8 @@ import UIKit
             if self.current == nil {
                 // A background answer already has CallKit UI. Defer a custom
                 // activity until foreground rather than bypassing ActivityKit.
-                guard UIApplication.shared.applicationState == .active,ActivityAuthorizationInfo().areActivitiesEnabled else { return }
+                // An AudioRecordingIntent must show one while it records.
+                guard UIApplication.shared.applicationState == .active || fromIntent,ActivityAuthorizationInfo().areActivitiesEnabled else { return }
                 do {
                     self.current=try Activity.request(attributes:VoiceActivityAttributes(sessionID:id,startedAt:startedAt,isCall:isCall),content:ActivityContent(state:content,staleDate:nil),pushType:nil)
                     self.lastState=content

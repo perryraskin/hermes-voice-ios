@@ -23,6 +23,9 @@ enum CredentialStore {
 @MainActor final class VoiceSession: NSObject, ObservableObject, AVAudioPlayerDelegate {
     var activityIdentifier=UUID()
     var activityStartedAt=Date()
+    /// Set when the Live Activity was requested before start(), so its ID is kept.
+    private var activityPrepared=false
+    func prepareActivity() { activityIdentifier=UUID();activityStartedAt=Date();activityPrepared=true }
     @Published var state: VoiceState = .ready
     @Published var muted = false
     @Published var connected = false
@@ -100,7 +103,7 @@ enum CredentialStore {
     func testConnection() async { do { var r = URLRequest(url:try baseURL().appendingPathComponent("v1/capabilities")); r.setValue("Bearer \(token)",forHTTPHeaderField:"Authorization"); r.timeoutInterval = 10; let (data,response) = try await PrivateHTTP.data(for:r); guard (response as? HTTPURLResponse)?.statusCode == 200, let cap = try JSONSerialization.jsonObject(with:data) as? [String:Any], cap["profile"] as? String == "voice", cap["ready"] as? Bool == true else { throw NSError(domain:"Hermes",code:2,userInfo:[NSLocalizedDescriptionKey:"The voice service is not ready or this device is not authorized."])}; availableProviders=VoiceProvider.available(in:cap); connected = true; error = "" } catch { connected = false; self.error = error.localizedDescription } }
     func start() async {
         guard !active, !starting else { return }; starting=true; defer { starting=false }; let attempt=generation; save(); guard error.isEmpty else { return }
-        activityIdentifier=UUID();activityStartedAt=Date();state = .connecting; await testConnection(); guard generation == attempt else { return }; guard connected else { state = .failed; return }
+        if activityPrepared { activityPrepared=false } else { activityIdentifier=UUID();activityStartedAt=Date() };state = .connecting; await testConnection(); guard generation == attempt else { return }; guard connected else { state = .failed; return }
         guard await AVAudioApplication.requestRecordPermission() else { error = "Allow microphone access in iPhone Settings."; state = .failed; return }
         guard generation == attempt else { return }
         guard let provider=VoiceProvider.resolve(preference:UserDefaults.standard.string(forKey:VoiceProvider.preferenceKey),available:availableProviders) else {

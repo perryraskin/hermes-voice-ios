@@ -23,4 +23,19 @@ final class LiveActivityTests:XCTestCase {
         _ = try await EndHermesSessionIntent(sessionID:session.activityIdentifier.uuidString).perform()
         XCTAssertFalse(session.active)
     }
+    @MainActor func testTalkIntentEndsAnActiveConversation() async throws {
+        let session=SharedRuntime.session;session.end();session.showConversationFixture()
+        defer { session.end() }
+        _ = try await StartHermesConversationIntent().perform()
+        XCTAssertFalse(session.active)
+        XCTAssertEqual(session.state,.ready)
+    }
+    @MainActor func testTalkIntentReportsAnUnconfiguredHost() async throws {
+        let session=SharedRuntime.session;session.end()
+        let host=session.host;defer { session.host=host;session.error="" }
+        session.host=""
+        do { _ = try await StartHermesConversationIntent().perform();XCTFail("Start must fail without a private host") }
+        catch { XCTAssertFalse(error.localizedDescription.isEmpty) }
+        XCTAssertFalse(session.active)
+    }
 }

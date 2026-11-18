@@ -27,7 +27,10 @@ struct SetDrivingStatusIntent:AppIntent {
     func perform() async throws -> some IntentResult & ProvidesDialog { _ = try await AttentionAPI.request("v1/driving",method:"POST",body:["active":driving]);return .result(dialog:driving ? "Hermes knows you’re driving.":"Hermes driving status cleared.") }
 }
 struct HermesShortcuts:AppShortcutsProvider {
-    static var appShortcuts:[AppShortcut] { AppShortcut(intent:SetDrivingStatusIntent(),phrases:["Set driving status in \(.applicationName)"],shortTitle:"Driving status",systemImageName:"car") }
+    static var appShortcuts:[AppShortcut] {
+        AppShortcut(intent:StartHermesConversationIntent(),phrases:["Talk to \(.applicationName)","Start a \(.applicationName) conversation"],shortTitle:"Talk to Hermes",systemImageName:"waveform")
+        AppShortcut(intent:SetDrivingStatusIntent(),phrases:["Set driving status in \(.applicationName)"],shortTitle:"Driving status",systemImageName:"car")
+    }
 }
 struct AttentionSettingsView:View {
     @State private var enabled=false
