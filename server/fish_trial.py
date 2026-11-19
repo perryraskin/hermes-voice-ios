@@ -5,7 +5,23 @@ are minted locally; provider retries attach to one persisted native execution.
 """
 import asyncio,hashlib,hmac,json,secrets,sqlite3,time,uuid,re
 from pathlib import Path
-from aiohttp import web,ClientSession,ClientTimeout
+from urllib.parse import urlsplit
+from aiohttp import web,ClientError,ClientSession,ClientTimeout
+
+# Display names and accents for the voices highlighted in the picker.
+FEATURED_VOICES = {
+    '8099a23a0d534ab3ad939403edca0a52': ('Chloe', 'American English'),
+    '667e7bc89ec5480f87881fa1db4f0386': ('Lolo Amboy', 'American English'),
+    'c700b259c8554960b218a7cb275ee565': ('Jarvis', 'British English'),
+    '3f218d33c9b14e84ab6a5ce6349db6c4': ('Calm British Narrator', 'British English'),
+    'ad8dc6944aa1454b998d4252c684c1bf': ('Bluey (Australian)', 'Character voices'),
+    '5ce21d46fe3544f68e38714c66a52f7b': ('Lightning McQueen', 'Character voices'),
+}
+
+
+def valid_voice_id(value):
+    return isinstance(value, str) and re.fullmatch(r'[a-f0-9]{32}', value) is not None
+
 
 class FishTrial:
     def __init__(self,config):
@@ -27,9 +43,67 @@ CREATE TABLE IF NOT EXISTS fish_runs (session TEXT, digest TEXT, status TEXT, re
     @property
     def ready(self):return all(self.config.get(k) for k in ('FISH_API_KEY','FISH_AGENT_ID','FISH_CALLBACK_KEY'))
 
+    async def voices(self, request):
+        if not self.ready:
+            raise web.HTTPServiceUnavailable(text='Fish voice is not configured')
+        query = request.query.get('q', '').strip()[:100]
+        headers = {'Authorization': 'Bearer ' + self.config['FISH_API_KEY']}
+        try:
+            async with ClientSession(timeout=ClientTimeout(total=10)) as http:
+                async def get_voice(voice_id):
+                    async with http.get('https://api.fish.audio/model/' + voice_id, headers=headers) as response:
+                        if response.status == 404:
+                            return None
+                        response.raise_for_status()
+                        return await response.json()
+
+                search = query.casefold()
+                featured = [voice_id for voice_id, (name, group) in FEATURED_VOICES.items()
+                            if not search or search in f'{name} {group}'.casefold()]
+                items = [item for item in await asyncio.gather(
+                    *(get_voice(voice_id) for voice_id in featured)
+                ) if item is not None]
+                if query:
+                    params = {'page_size': '30', 'title': query, 'licensed': 'true', 'language': 'en'}
+                    async with http.get('https://api.fish.audio/model', params=params, headers=headers) as response:
+                        response.raise_for_status()
+                        items.extend(item for item in (await response.json())['items']
+                                     if item.get('_id') not in featured)
+        except (ClientError, asyncio.TimeoutError, KeyError, ValueError):
+            raise web.HTTPBadGateway(text='Fish voices could not be loaded')
+        voices = []
+        for item in items:
+            if not valid_voice_id(item.get('_id')) or not isinstance(item.get('title'), str):
+                continue
+            voice_id = item['_id']
+            voice = {'id': voice_id, 'name': item['title']}
+            if voice_id in FEATURED_VOICES:
+                voice['name'], voice['group'] = FEATURED_VOICES[voice_id]
+            for sample in item.get('samples') or []:
+                audio = sample.get('audio')
+                if not isinstance(audio, str):
+                    continue
+                try:
+                    url = urlsplit(audio)
+                except ValueError:
+                    continue
+                host = url.hostname or ''
+                trusted = host.endswith('.fish.audio') or (
+                    host == 'c97f3361a1c971323738e24f451a0225.r2.cloudflarestorage.com'
+                    and url.path.startswith(('/fish-platform-data/task/', '/fish-platform-data/tasks/'))
+                )
+                if url.scheme == 'https' and trusted and not url.username:
+                    voice['sampleURL'] = audio
+                    break
+            voices.append(voice)
+        return web.json_response(voices, headers={'Cache-Control': 'no-store'})
+
     async def create_session(self,request):
         if not self.ready:raise web.HTTPServiceUnavailable(text='Fish voice is not configured')
         data=await request.json() if request.can_read_body else {}
+        voice_id = data.get('voice_id')
+        if voice_id is not None and not valid_voice_id(voice_id):
+            raise web.HTTPBadRequest(text='Invalid Fish voice ID')
         call=data.get('call_id');context=None
         if call:
             context=request.app['attention'].store.context(call,time.time())
@@ -49,10 +123,15 @@ CREATE TABLE IF NOT EXISTS fish_runs (session TEXT, digest TEXT, status TEXT, re
             request.app['returns'].bind(native,call)
             request.app['returns'].db.execute('UPDATE voice_bindings SET expires=? WHERE session_id=?',(expires,native));request.app['returns'].db.commit()
         payload={'agent_id':self.config['FISH_AGENT_ID'],'end_user_id':'hermes-owner','timezone':'America/New_York','record_audio':False,'tool_events':False,'llm_extra_body':{'bridge_session':sid}}
+        overrides = {}
+        if voice_id is not None:
+            overrides['voice_id'] = voice_id
         if context:
             opener='Perry, '+context['title']+'. '+context['body'][:500]
             if len(context['body'])>500:opener+=' I have more detail if you need it.'
-            payload['overrides']={'first_message':' '.join(opener.split())}
+            overrides['first_message'] = ' '.join(opener.split())
+        if overrides:
+            payload['overrides'] = overrides
         try:
             async with ClientSession(timeout=ClientTimeout(total=20)) as http:
                 async with http.post('https://api.fish.audio/v1/agent/sessions',headers={'Authorization':'Bearer '+self.config['FISH_API_KEY']},json=payload) as response:
@@ -206,6 +285,7 @@ CREATE TABLE IF NOT EXISTS fish_runs (session TEXT, digest TEXT, status TEXT, re
 
 def install(app,config):
     trial=FishTrial(config);app['fish_trial']=trial
+    app.router.add_get('/v1/fish/voices', trial.voices)
     app.router.add_post('/v1/fish/sessions',trial.create_session)
     app.router.add_post('/v1/fish/observation',trial.observation)
     app.router.add_post('/v1/fish/sessions/{session}/end',trial.end_session)

@@ -23,3 +23,13 @@ enum VoiceProvider:String,CaseIterable,Identifiable {
         return allCases.first(where:available.contains)
     }
 }
+
+
+struct FishVoice: Decodable, Identifiable {
+    static let preferenceKey = "fishVoiceID"
+    static let nameKey = "fishVoiceName"
+    let id: String
+    let name: String
+    let sampleURL: URL?
+    let group: String?
+}

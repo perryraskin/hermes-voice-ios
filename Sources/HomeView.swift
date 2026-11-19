@@ -1,3 +1,4 @@
+import AVFoundation
 import SwiftUI
 
 private let sage = Color(red:0.79,green:0.91,blue:0.74)
@@ -43,6 +44,7 @@ struct HomeView: View {
         .animation(reduceMotion ? nil:.easeInOut(duration:0.25),value:session.state)
         .animation(reduceMotion ? nil:.easeInOut(duration:0.2),value:session.muted)
         .sensoryFeedback(.selection,trigger:session.muted)
+        .task { await session.testConnectionOnLaunch() }
         // CallKit and this screen use SharedRuntime.session. Returning to the app
         // reveals that session without starting a new connection or stopping audio.
         .onChange(of:engaged) { _,ongoing in
@@ -65,7 +67,8 @@ struct HomeView: View {
                 Text("Hermes").font(.system(size:headingSize,weight:.semibold)).tracking(-0.7)
                 HStack(spacing:6) {
                     Circle().fill(session.connected ? sage:.gray).frame(width:5,height:5)
-                    Text(session.connected ? "Connected":"Not connected").font(.caption).foregroundStyle(.secondary)
+                    Text(session.checkingConnection ? "Checking connection…" : session.connected ? "Connected" : "Not connected")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
             }
             Spacer()
@@ -140,15 +143,198 @@ struct TranscriptView: View {
     }
 }
 struct SettingsView: View {
+    @AppStorage(FishVoice.nameKey) private var fishVoiceName = ""
     @AppStorage(VoiceProvider.preferenceKey) private var voiceProvider=VoiceProvider.preferred.rawValue
     @EnvironmentObject var session:VoiceSession
     @Environment(\.dismiss) var dismiss
     var body:some View { NavigationStack { Form {
         Section("Private connection") { if !session.error.isEmpty { Text(session.error).font(.footnote).foregroundStyle(.orange) }; TextField("https://your-host.tailnet.ts.net:port",text:$session.host).textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL).accessibilityLabel("Private host URL"); SecureField("Device credential",text:$session.token).accessibilityLabel("Device credential"); Button("Test connection") { session.save(); Task { await session.testConnection() } }; Label(session.connected ? "Connected to Hermes Voice":"Not connected",systemImage:session.connected ? "checkmark.circle":"network") }
         Section { NavigationLink("Calls & attention") { AttentionSettingsView() } }
-        Section("Voice") { Picker("Voice engine",selection:$voiceProvider) { ForEach(VoiceProvider.allCases) { provider in Text(provider.name).tag(provider.rawValue) } }.disabled(session.active); LabeledContent("Agent",value:"Hermes Voice"); Text("Your selected engine is used for manual conversations and incoming Hermes calls. Voice selection is managed by your private host.").font(.footnote).foregroundStyle(.secondary) }
+        Section("Voice") { Picker("Voice engine",selection:$voiceProvider) { ForEach(VoiceProvider.allCases) { provider in Text(provider.name).tag(provider.rawValue) } }.disabled(session.active); if voiceProvider == VoiceProvider.fish.rawValue {
+            NavigationLink { FishVoicePicker() } label: {
+                LabeledContent("Fish Audio voice", value: fishVoiceName.isEmpty ? "Agent default" : fishVoiceName)
+            }.disabled(session.active)
+        }; Text("Voice settings apply to new manual conversations and incoming Hermes calls.").font(.footnote).foregroundStyle(.secondary) }
         Section("Privacy") { Text("Tailscale connects to your private host. ElevenLabs conversations relay speech through the host; Fish Audio streams speech directly to Fish using short-lived WebRTC credentials. Hermes supplies replies through a dedicated authenticated callback. Fish audio recording is disabled. This app keeps the current transcript in memory.").font(.footnote) }
         if !session.error.isEmpty { Section("Connection details") { Text(session.error).foregroundStyle(.orange) } }
         Section { Button("Forget this device",role:.destructive) { session.end(); session.token=""; session.host=""; try? CredentialStore.save(""); UserDefaults.standard.removeObject(forKey:"host"); session.connected=false } }
     }.navigationTitle("Settings").toolbar { Button("Done") { if session.host.isEmpty && session.token.isEmpty { session.error=""; dismiss() } else { session.save(); if session.error.isEmpty { dismiss() } } } } } }
+}
+
+private struct FishVoicePicker: View {
+    @EnvironmentObject private var session: VoiceSession
+    @Environment(\.dismiss) private var dismiss
+    @AppStorage(FishVoice.preferenceKey) private var selection = ""
+    @AppStorage(FishVoice.nameKey) private var selectedName = ""
+    @State private var query = ""
+    @State private var voices: [FishVoice] = []
+    @State private var loading = true
+    @State private var failed = false
+    @State private var retry = 0
+    @State private var player = AVPlayer()
+    @State private var previewingID: String?
+    @State private var previewError = false
+    @State private var previewStatus: NSKeyValueObservation?
+    @State private var previewReady = false
+    @State private var previewAudioActive = false
+
+    var body: some View {
+        List {
+            choice(id: "", name: "Agent default")
+            if !selection.isEmpty && !voices.contains(where: { $0.id == selection }) {
+                choice(id: selection, name: selectedName)
+            }
+            if previewError {
+                Text("Couldn’t play the voice sample. Try again.").foregroundStyle(.secondary)
+            }
+            if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                ForEach(voiceGroups, id: \.self) { group in
+                    Section(group) {
+                        ForEach(voices.filter { ($0.group ?? "Voices") == group }) { voice in
+                            voiceRow(voice)
+                        }
+                    }
+                }
+            } else if !voices.isEmpty {
+                Section("Search results") {
+                    ForEach(voices) { voice in voiceRow(voice) }
+                }
+            }
+            if loading {
+                ProgressView("Loading voices")
+            } else if failed {
+                Button("Couldn’t load voices. Retry") { retry += 1 }
+            } else if voices.isEmpty {
+                Text("No voices found").foregroundStyle(.secondary)
+            }
+        }
+        .navigationTitle("Fish Audio voice")
+        .searchable(text: $query, prompt: "Search Fish Audio voices")
+        .onDisappear { stopPreview() }
+        .onChange(of: session.active) { _, active in
+            if active { stopPreview() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)) { notification in
+            if let item = notification.object as? AVPlayerItem, item === player.currentItem { stopPreview() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemFailedToPlayToEndTime)) { notification in
+            if let item = notification.object as? AVPlayerItem, item === player.currentItem {
+                stopPreview()
+                previewError = true
+            }
+        }
+        .task(id: [query, String(retry), session.host, session.token]) {
+            stopPreview()
+            previewError = false
+            loading = true
+            failed = false
+            voices = []
+            do {
+                try await Task.sleep(for: .milliseconds(300))
+                let result = try await session.loadFishVoices(matching: query)
+                try Task.checkCancellation()
+                voices = result
+                loading = false
+            } catch {
+                guard !Task.isCancelled else { return }
+                failed = true
+                loading = false
+            }
+        }
+    }
+
+    private var voiceGroups: [String] {
+        voices.reduce(into: []) { groups, voice in
+            let group = voice.group ?? "Voices"
+            if !groups.contains(group) { groups.append(group) }
+        }
+    }
+
+    private func voiceRow(_ voice: FishVoice) -> some View {
+        HStack {
+            choice(id: voice.id, name: voice.name)
+            if let url = voice.sampleURL {
+                Button {
+                    togglePreview(id: voice.id, url: url)
+                } label: {
+                    Group {
+                        if previewingID == voice.id && !previewReady {
+                            ProgressView()
+                        } else {
+                            Image(systemName: previewingID == voice.id ? "stop.circle.fill" : "play.circle")
+                                .font(.title2)
+                        }
+                    }
+                    .frame(minWidth: 44, minHeight: 44)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel(previewingID == voice.id ? "Stop sample" : "Play sample for \(voice.name)")
+                .disabled(session.active)
+            }
+        }
+    }
+
+    private func togglePreview(id: String, url: URL) {
+        let wasPlaying = previewingID == id
+        stopPreview()
+        previewError = false
+        guard !wasPlaying, !session.active else { return }
+        let audio = AVAudioSession.sharedInstance()
+        do {
+            try audio.setCategory(.playback, mode: .default)
+            try audio.setActive(true)
+            previewAudioActive = true
+        } catch {
+            previewError = true
+            return
+        }
+        let item = AVPlayerItem(url: url)
+        player.replaceCurrentItem(with: item)
+        previewingID = id
+        previewStatus = item.observe(\.status, options: [.initial, .new]) { item, _ in
+            Task { @MainActor in
+                guard item === player.currentItem else { return }
+                switch item.status {
+                case .readyToPlay: previewReady = true
+                case .failed:
+                    stopPreview()
+                    previewError = true
+                default: break
+                }
+            }
+        }
+        player.play()
+    }
+
+    private func stopPreview() {
+        previewStatus = nil
+        player.pause()
+        player.replaceCurrentItem(with: nil)
+        previewingID = nil
+        previewReady = false
+        if previewAudioActive {
+            previewAudioActive = false
+            if !session.active {
+                try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            }
+        }
+    }
+
+    private func choice(id: String, name: String) -> some View {
+        Button {
+            selection = id
+            selectedName = id.isEmpty ? "" : name
+            dismiss()
+        } label: {
+            HStack {
+                Text(name)
+                Spacer()
+                if selection == id { Image(systemName: "checkmark") }
+            }
+        }
+        .buttonStyle(.borderless)
+        .accessibilityAddTraits(selection == id ? .isSelected : [])
+        .disabled(session.active)
+    }
 }

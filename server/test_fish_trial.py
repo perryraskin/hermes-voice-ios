@@ -59,7 +59,7 @@ class IncomingFishTests(AioHTTPTestCase):
     async def get_application(self):
         from app import create_app
         return create_app({'ATTENTION_DB':':memory:','FISH_TRIAL_DB':':memory:','DEVICE_TOKEN':'owner-test','VOICE_TOOL_TOKEN':'voice-test','FISH_CALLBACK_KEY':'callback-test','FISH_API_KEY':'fish-test','FISH_AGENT_ID':'agent-test','HERMES_URL':'http://127.0.0.1','HERMES_KEY':'test','ELEVENLABS_KEY':'test'})
-    async def make_call(self):
+    async def make_call(self, **options):
         import uuid
         self.call=str(uuid.uuid4());self.thread=str(uuid.uuid4())
         store=self.app['attention'].store
@@ -78,10 +78,38 @@ class IncomingFishTests(AioHTTPTestCase):
             def post(self,*args,**kwargs):outer.payload=kwargs.get('json');return Response()
         from unittest.mock import patch
         with patch('fish_trial.ClientSession',return_value=HTTP()):
-            response=await self.client.post('/v1/fish/sessions',headers={'Authorization':'Bearer owner-test'},json={'call_id':self.call})
+            response=await self.client.post('/v1/fish/sessions',headers={'Authorization':'Bearer owner-test'},json={'call_id':self.call, **options})
             self.assertEqual(response.status,200)
         self.sid=self.payload['llm_extra_body']['bridge_session']
         self.native=self.app['fish_trial'].db.execute('SELECT native_id FROM fish_sessions WHERE id=?',(self.sid,)).fetchone()[0]
+    async def test_selected_voice_preserves_incoming_greeting(self):
+        await self.make_call(voice_id='a' * 32)
+        self.assertEqual(self.payload['overrides']['voice_id'], 'a' * 32)
+        self.assertIn('Approve the preview?', self.payload['overrides']['first_message'])
+
+    async def test_invalid_voice_is_rejected_before_registering_session(self):
+        response = await self.client.post('/v1/fish/sessions',
+            headers={'Authorization': 'Bearer owner-test'}, json={'voice_id': {'id': 'invalid'}})
+        self.assertEqual(response.status, 400)
+        self.assertEqual(self.app['fish_trial'].db.execute('SELECT count(*) FROM fish_sessions').fetchone()[0], 0)
+
+    async def test_voice_catalog_requires_device_auth_and_returns_search_matches(self):
+        from unittest.mock import AsyncMock, MagicMock, patch
+        endpoint = '/v1/fish/voices?q=Example'
+        self.assertEqual((await self.client.get(endpoint)).status, 401)
+        response = MagicMock()
+        response.json = AsyncMock(return_value={'items': [{'_id': 'a' * 32, 'title': 'Jarvis', 'extra': 'ignored', 'samples': [{'audio': 'http://fish.audio/bad'}, {'audio': 'https://platform.r2.fish.audio/sample.mp3'}]}]})
+        http = MagicMock()
+        http.get.return_value.__aenter__.return_value = response
+        with patch('fish_trial.ClientSession') as client:
+            client.return_value.__aenter__.return_value = http
+            result = await self.client.get(endpoint, headers={'Authorization': 'Bearer owner-test'})
+            self.assertEqual(await result.json(), [{'id': 'a' * 32, 'name': 'Jarvis', 'sampleURL': 'https://platform.r2.fish.audio/sample.mp3'}])
+            self.assertEqual(http.get.call_args.kwargs['params']['title'], 'Example')
+            response.json.side_effect = ValueError()
+            result = await self.client.get(endpoint, headers={'Authorization': 'Bearer owner-test'})
+            self.assertEqual(result.status, 502)
+
     async def observe(self,text,digest):
         return await self.client.post('/v1/fish/observation',headers={'Authorization':'Bearer callback-test'},json={'session':self.sid,'text':text,'digest':digest*64})
     async def decision(self,action,answer=None):

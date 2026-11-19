@@ -49,6 +49,8 @@ struct HermesVoiceActivityWidget:Widget {
                 }
                 DynamicIslandExpandedRegion(.trailing) {
                     Text(context.attributes.startedAt,style:.timer).font(.caption.monospacedDigit()).multilineTextAlignment(.trailing).foregroundStyle(.secondary)
+                        .padding(.trailing, 10)
+                        .padding(.top, 2)
                 }
                 DynamicIslandExpandedRegion(.bottom) {
                     HStack {

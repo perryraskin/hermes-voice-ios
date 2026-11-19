@@ -32,9 +32,14 @@ struct FishSessionToken:Decodable {
         Self.currentAudioOwner=audioOwner
         try Self.configureAudio(systemManaged:systemManaged,active:session?.audioActivated == true)
         var request=URLRequest(url:host.appendingPathComponent("v1/fish/sessions"));request.httpMethod="POST";request.timeoutInterval=25;request.setValue("Bearer \(credential)",forHTTPHeaderField:"Authorization")
-        if let call=session?.attentionCallID {
+        var body: [String: String] = [:]
+        body["call_id"] = session?.attentionCallID
+        if let voice = UserDefaults.standard.string(forKey: FishVoice.preferenceKey), !voice.isEmpty {
+            body["voice_id"] = voice
+        }
+        if !body.isEmpty {
             request.setValue("application/json",forHTTPHeaderField:"Content-Type")
-            request.httpBody=try JSONSerialization.data(withJSONObject:["call_id":call])
+            request.httpBody=try JSONSerialization.data(withJSONObject:body)
         }
         let (data,response)=try await PrivateHTTP.data(for:request)
         guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw NSError(domain:"Fish",code:1,userInfo:[NSLocalizedDescriptionKey:"Fish could not start. Check the trial configuration or credit."]) }

@@ -29,6 +29,9 @@ enum CredentialStore {
     @Published var state: VoiceState = .ready
     @Published var muted = false
     @Published var connected = false
+    @Published private(set) var checkingConnection = false
+    private var attemptedLaunchConnection = false
+    private var connectionCheckID = UUID()
     @Published var error = ""
     @Published var entries: [TranscriptEntry] = []
     @Published var level: CGFloat = 0
@@ -100,7 +103,63 @@ enum CredentialStore {
     }
     func save() { do { _ = try baseURL(); try CredentialStore.save(token); UserDefaults.standard.set(host,forKey:"host"); error = "" } catch { self.error = error.localizedDescription } }
     func baseURL() throws -> URL { guard let u = URL(string:host), u.scheme == "https", u.host?.hasSuffix(".ts.net") == true, u.user == nil, u.password == nil, u.query == nil, u.fragment == nil else { throw NSError(domain:"Hermes",code:1,userInfo:[NSLocalizedDescriptionKey:"Enter your private HTTPS Tailscale host (.ts.net)."])}; return u }
-    func testConnection() async { do { var r = URLRequest(url:try baseURL().appendingPathComponent("v1/capabilities")); r.setValue("Bearer \(token)",forHTTPHeaderField:"Authorization"); r.timeoutInterval = 10; let (data,response) = try await PrivateHTTP.data(for:r); guard (response as? HTTPURLResponse)?.statusCode == 200, let cap = try JSONSerialization.jsonObject(with:data) as? [String:Any], cap["profile"] as? String == "voice", cap["ready"] as? Bool == true else { throw NSError(domain:"Hermes",code:2,userInfo:[NSLocalizedDescriptionKey:"The voice service is not ready or this device is not authorized."])}; availableProviders=VoiceProvider.available(in:cap); connected = true; error = "" } catch { connected = false; self.error = error.localizedDescription } }
+    func testConnectionOnLaunch(
+        load: (URLRequest) async throws -> (Data, URLResponse) = PrivateHTTP.data(for:)
+    ) async {
+        guard !attemptedLaunchConnection, !connected, !checkingConnection, !starting,
+              !active, !host.isEmpty, !token.isEmpty else { return }
+        attemptedLaunchConnection = true
+        await testConnection(load: load)
+    }
+    func testConnection(
+        load: (URLRequest) async throws -> (Data, URLResponse) = PrivateHTTP.data(for:)
+    ) async {
+        let id = UUID()
+        let checkedHost = host
+        let checkedToken = token
+        connectionCheckID = id
+        checkingConnection = true
+        defer {
+            if connectionCheckID == id { checkingConnection = false }
+        }
+        do {
+            var request = URLRequest(url: try baseURL().appendingPathComponent("v1/capabilities"))
+            request.setValue("Bearer \(checkedToken)", forHTTPHeaderField: "Authorization")
+            request.timeoutInterval = 10
+            let (data, response) = try await load(request)
+            guard (response as? HTTPURLResponse)?.statusCode == 200,
+                  let capabilities = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  capabilities["profile"] as? String == "voice", capabilities["ready"] as? Bool == true else {
+                throw NSError(domain: "Hermes", code: 2, userInfo: [
+                    NSLocalizedDescriptionKey: "The voice service is not ready or this device is not authorized."
+                ])
+            }
+            guard !Task.isCancelled, connectionCheckID == id, host == checkedHost, token == checkedToken else { return }
+            availableProviders = VoiceProvider.available(in: capabilities)
+            connected = true
+            error = ""
+        } catch {
+            guard !Task.isCancelled, connectionCheckID == id, host == checkedHost, token == checkedToken else { return }
+            connected = false
+            self.error = error.localizedDescription
+        }
+    }
+    func loadFishVoices(matching query: String) async throws -> [FishVoice] {
+        let endpoint = try baseURL().appendingPathComponent("v1/fish/voices")
+        guard var url = URLComponents(url: endpoint, resolvingAgainstBaseURL: false) else {
+            throw URLError(.badURL)
+        }
+        url.queryItems = [URLQueryItem(name: "q", value: query)]
+        guard let address = url.url else { throw URLError(.badURL) }
+        var request = URLRequest(url: address, timeoutInterval: 15)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        let (data, response) = try await PrivateHTTP.data(for: request)
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+            throw URLError(.badServerResponse)
+        }
+        return try JSONDecoder().decode([FishVoice].self, from: data)
+    }
+
     func start() async {
         guard !active, !starting else { return }; starting=true; defer { starting=false }; let attempt=generation; save(); guard error.isEmpty else { return }
         if activityPrepared { activityPrepared=false } else { activityIdentifier=UUID();activityStartedAt=Date() };state = .connecting; await testConnection(); guard generation == attempt else { return }; guard connected else { state = .failed; return }
